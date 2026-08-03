@@ -12,7 +12,7 @@ workflows:
         # (Team settings > Code signing identities). Deve combaciare
         # esattamente col nome che darai in quella schermata.
         distribution_type: app_store
-        bundle_identifier: it.photopix.saurosoftradio
+        bundle_identifier: it.photopix.saurosoft_radio
       vars:
         # ID numerico della tua app, si trova in App Store Connect
         # dopo aver creato la scheda app (My Apps > la tua app > General > App Information)
@@ -47,6 +47,29 @@ workflows:
         # (meglio lasciarlo false all'inizio, e premere "Submit for Review"
         # a mano su App Store Connect quando sei pronto)
         submit_to_app_store: false
+
+  simulator-workflow:
+    name: Saurosoft Radio - iOS Simulatore (per testare senza Apple Developer)
+    max_build_duration: 30
+    instance_type: mac_mini_m2
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+    scripts:
+      - name: Scarica le dipendenze Flutter
+        script: flutter packages pub get
+      - name: Installa i pod di CocoaPods
+        script: |
+          find . -name "Podfile" -execdir pod install \;
+      - name: Compila per il simulatore (nessuna firma necessaria)
+        script: flutter build ios --simulator --no-codesign
+      - name: Comprimi l'app del simulatore
+        script: |
+          cd build/ios/iphonesimulator
+          zip -r saurosoft_radio_simulator.zip Runner.app
+    artifacts:
+      - build/ios/iphonesimulator/saurosoft_radio_simulator.zip
 
   android-workflow:
     name: Saurosoft Radio - Android (Play Store)
