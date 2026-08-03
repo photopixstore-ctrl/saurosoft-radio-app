@@ -1,0 +1,63 @@
+workflows:
+  ios-workflow:
+    name: Saurosoft Radio - iOS (App Store)
+    max_build_duration: 60
+    instance_type: mac_mini_m2
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+      ios_signing:
+        # Nome dell'integrazione di firma creata in Codemagic
+        # (Team settings > Code signing identities). Deve combaciare
+        # esattamente col nome che darai in quella schermata.
+        distribution_type: app_store
+        bundle_identifier: it.photopix.saurosoftradio
+      vars:
+        # ID numerico della tua app, si trova in App Store Connect
+        # dopo aver creato la scheda app (My Apps > la tua app > General > App Information)
+        APP_STORE_APPLE_ID: 0000000000
+    integrations:
+      # Nome dell'integrazione App Store Connect creata in Codemagic
+      # (Team settings > Integrations > App Store Connect)
+      app_store_connect: codemagic_app_store_connect
+    scripts:
+      - name: Collega automaticamente certificati e profili
+        script: xcode-project use-profiles
+      - name: Scarica le dipendenze Flutter
+        script: flutter packages pub get
+      - name: Installa i pod di CocoaPods
+        script: |
+          find . -name "Podfile" -execdir pod install \;
+      - name: Compila il pacchetto .ipa
+        script: |
+          BUILD_NUMBER=$(($(app-store-connect get-latest-app-store-build-number "$APP_STORE_APPLE_ID") + 1))
+          flutter build ipa --release \
+            --build-name=1.0.0 \
+            --build-number=$BUILD_NUMBER \
+            --export-options-plist=/Users/builder/export_options.plist
+    artifacts:
+      - build/ios/ipa/*.ipa
+    publishing:
+      app_store_connect:
+        auth: integration
+        # true = carica automaticamente su TestFlight ad ogni build
+        submit_to_testflight: true
+        # true = invia anche in revisione per la pubblicazione pubblica
+        # (meglio lasciarlo false all'inizio, e premere "Submit for Review"
+        # a mano su App Store Connect quando sei pronto)
+        submit_to_app_store: false
+
+  android-workflow:
+    name: Saurosoft Radio - Android (Play Store)
+    max_build_duration: 60
+    instance_type: linux_x2
+    environment:
+      flutter: stable
+    scripts:
+      - name: Scarica le dipendenze Flutter
+        script: flutter packages pub get
+      - name: Compila il pacchetto .aab
+        script: flutter build appbundle --release
+    artifacts:
+      - build/**/outputs/**/*.aab
