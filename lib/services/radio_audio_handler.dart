@@ -3,58 +3,65 @@ import 'package:audio_service/audio_service.dart';
 import 'package:just_audio/just_audio.dart';
 import '../radio_config.dart';
 import 'metadata_service.dart';
-import 'cover_art_service.dart';
 
 /// Cuore dell'app: un solo AudioHandler che alimenta contemporaneamente
 /// lock screen (iOS/Android), notifica di riproduzione, Android Auto e
-/// CarPlay. E' l'equivalente cross-platform di PlaybackService.kt.
+/// CarPlay. Equivalente cross-platform di PlaybackService.kt.
+///
+/// Stessa logica "live only" della versione Android (LiveOnlyPlayer):
+/// pause() ferma davvero lo stream (non tiene il buffer), play() riapre
+/// una connessione fresca - cosi' non si sente mai audio "vecchio" dopo
+/// una pausa lunga.
 ///
 /// Nota CarPlay: l'entitlement "com.apple.developer.carplay-audio" va
-/// richiesto separatamente ad Apple (approvazione manuale, vedi SETUP_MAC.md).
+/// richiesto separatamente ad Apple (vedi SETUP_MAC.md).
 class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   final AudioPlayer _player = AudioPlayer();
   final MetadataService _metadataService = MetadataService();
-  final CoverArtService _coverArtService = CoverArtService();
 
   Timer? _pollTimer;
+  Timer? _sleepTimer;
+  bool _wasPlayingBeforeError = false;
   String _lastArtist = '';
   String _lastTitle = '';
+
+  /// Nomi delle custom action esposte a lock screen/UI, stessa idea dei
+  /// SessionCommand custom di PlaybackService.kt.
+  static const String actionSetSleepTimer = 'setSleepTimer';
+  static const String actionCancelSleepTimer = 'cancelSleepTimer';
 
   RadioAudioHandler() {
     _init();
   }
 
   Future<void> _init() async {
-    // Propaga lo stato del player (playing/paused/buffering) verso il sistema
-    _player.playbackEventStream.listen((event) {
-      playbackState.add(playbackState.value.copyWith(
-        controls: [
-          MediaControl.rewind,
-          if (_player.playing) MediaControl.pause else MediaControl.play,
-          MediaControl.stop,
-        ],
-        systemActions: const {
-          MediaAction.seek,
-          MediaAction.play,
-          MediaAction.pause,
-        },
-        androidCompactActionIndices: const [0, 1],
-        processingState: _mapProcessingState(_player.processingState),
-        playing: _player.playing,
-        updatePosition: _player.position,
-        bufferedPosition: _player.bufferedPosition,
-        speed: _player.speed,
-      ));
-    });
+    _player.playbackEventStream.listen(
+      (event) {
+        playbackState.add(playbackState.value.copyWith(
+          controls: [
+            if (_player.playing) MediaControl.pause else MediaControl.play,
+            MediaControl.stop,
+          ],
+          systemActions: const {MediaAction.play, MediaAction.pause},
+          androidCompactActionIndices: const [0],
+          processingState: _mapProcessingState(_player.processingState),
+          playing: _player.playing,
+          updatePosition: _player.position,
+          bufferedPosition: _player.bufferedPosition,
+          speed: _player.speed,
+        ));
+      },
+      onError: (Object e, StackTrace st) => _handleStreamError(),
+    );
 
     mediaItem.add(MediaItem(
       id: RadioConfig.streamUrl,
       title: RadioConfig.stationName,
-      artist: 'In attesa dei dati...',
-      artUri: Uri.parse(RadioConfig.logoAssetPath),
+      artist: RadioConfig.tagline,
+      artUri: Uri.parse(RadioConfig.fallbackLogoUrl),
     ));
 
-    await _player.setUrl(RadioConfig.streamUrl);
+    await _loadStream();
     _startMetadataPolling();
   }
 
@@ -73,66 +80,118 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     }
   }
 
+  Future<void> _loadStream() async {
+    try {
+      await _player.setAudioSource(
+        AudioSource.uri(
+          Uri.parse(RadioConfig.streamUrl),
+          headers: const {'User-Agent': 'SaurosoftRadioApp/1.0'},
+        ),
+      );
+    } catch (_) {
+      _handleStreamError();
+    }
+  }
+
+  /// Se lo streaming si interrompe per un errore di rete, riproviamo da
+  /// soli dopo 3 secondi - stesso comportamento di PlaybackService.kt.
+  void _handleStreamError() {
+    Future.delayed(const Duration(seconds: 3), () async {
+      await _loadStream();
+      if (_wasPlayingBeforeError) {
+        await _player.play();
+      }
+    });
+  }
+
   void _startMetadataPolling() {
     _pollTimer?.cancel();
     _pollTimer = Timer.periodic(
       Duration(seconds: RadioConfig.metadataPollIntervalSeconds),
       (_) => _refreshMetadata(),
     );
-    _refreshMetadata(); // prima chiamata subito, senza aspettare il primo tick
+    _refreshMetadata();
   }
 
   Future<void> _refreshMetadata() async {
     final nowPlaying = await _metadataService.fetchNowPlaying();
     if (nowPlaying.artist == _lastArtist && nowPlaying.title == _lastTitle) {
-      return; // nessun cambiamento, evita di ridisegnare la UI inutilmente
+      return;
     }
     _lastArtist = nowPlaying.artist;
     _lastTitle = nowPlaying.title;
 
-    final coverUrl = nowPlaying.coverArtUrl ??
-        await _coverArtService.findCoverArt(
-          artist: nowPlaying.artist,
-          title: nowPlaying.title,
-        );
-
     mediaItem.add(MediaItem(
       id: RadioConfig.streamUrl,
-      title: nowPlaying.title.isEmpty ? RadioConfig.stationName : nowPlaying.title,
-      artist: nowPlaying.artist.isEmpty ? RadioConfig.stationName : nowPlaying.artist,
-      artUri: Uri.parse(coverUrl),
+      title: nowPlaying.title,
+      artist: nowPlaying.subtitle(),
+      artUri: Uri.parse(nowPlaying.cover),
     ));
   }
 
   @override
   Future<void> play() async {
-    // Ricarica sempre l'URL con un token dinamico prima di ripartire:
-    // evita il problema di stream "bloccato" dopo l'intro gia' visto in Android
-    // (probabile redirect non seguito correttamente dal player precedente).
+    _wasPlayingBeforeError = true;
+    // Stesso comportamento di LiveOnlyPlayer.play(): se il player e' in
+    // stato idle (dopo un pause "vero" o un errore), ricarica lo stream
+    // da zero invece di riprendere un buffer vecchio.
     if (_player.processingState == ProcessingState.idle ||
         _player.processingState == ProcessingState.completed) {
-      await _player.setUrl(
-        '${RadioConfig.streamUrl}?_a=${DateTime.now().millisecondsSinceEpoch}',
-      );
+      await _loadStream();
     }
     await _player.play();
   }
 
   @override
-  Future<void> pause() => _player.pause();
+  Future<void> pause() async {
+    _wasPlayingBeforeError = false;
+    // Stesso comportamento di LiveOnlyPlayer.pause(): stop vero, non una
+    // pausa che tiene il buffer, cosi' alla ripresa si riparte dal vivo.
+    await _player.stop();
+  }
 
   @override
   Future<void> stop() async {
+    _wasPlayingBeforeError = false;
     await _player.stop();
     _pollTimer?.cancel();
     return super.stop();
   }
 
   @override
-  Future<void> seek(Duration position) => _player.seek(position);
+  Future<void> seek(Duration position) async {
+    // Streaming live: il seek non ha senso, viene ignorato.
+  }
+
+  /// Sleep timer e sveglia passano da qui, stesso schema dei SessionCommand
+  /// custom gestiti da LibrarySessionCallback in PlaybackService.kt.
+  @override
+  Future<dynamic> customAction(String name, [Map<String, dynamic>? extras]) async {
+    switch (name) {
+      case actionSetSleepTimer:
+        final minuti = (extras?['minutes'] as num?)?.toInt() ?? 0;
+        if (minuti > 0) _setSleepTimer(minuti);
+        break;
+      case actionCancelSleepTimer:
+        _cancelSleepTimer();
+        break;
+    }
+    return null;
+  }
+
+  void _setSleepTimer(int minuti) {
+    _sleepTimer?.cancel();
+    _sleepTimer = Timer(Duration(minutes: minuti), () => pause());
+  }
+
+  void _cancelSleepTimer() {
+    _sleepTimer?.cancel();
+    _sleepTimer = null;
+  }
 
   void dispose() {
     _pollTimer?.cancel();
+    _sleepTimer?.cancel();
     _player.dispose();
   }
 }

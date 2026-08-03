@@ -1,21 +1,67 @@
 import 'package:audio_service/audio_service.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
+import 'package:share_plus/share_plus.dart';
 import '../radio_config.dart';
+import '../widgets/cast_airplay_button.dart';
+import 'playlist_screen.dart';
+import 'timer_sveglia_dialog.dart';
 
 class NowPlayingScreen extends StatelessWidget {
   final AudioHandler audioHandler;
 
   const NowPlayingScreen({super.key, required this.audioHandler});
 
-  /// Sfondo stagionale: stesso concetto gia' presente nell'app Android
-  /// (cambia in base al mese corrente, es. neve in inverno, foglie in autunno).
-  String _seasonalBackground() {
-    final month = DateTime.now().month;
-    if (month == 12 || month <= 2) return 'assets/images/bg_winter.jpg';
-    if (month >= 3 && month <= 5) return 'assets/images/bg_spring.jpg';
-    if (month >= 6 && month <= 8) return 'assets/images/bg_summer.jpg';
-    return 'assets/images/bg_autumn.jpg';
+  void _showInfoDialog(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Informazioni sviluppatore'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            CachedNetworkImage(
+              imageUrl: RadioConfig.infoLogoUrl,
+              height: 60,
+              errorWidget: (_, __, ___) => const SizedBox(height: 60),
+            ),
+            const SizedBox(height: 16),
+            Text(RadioConfig.infoText, textAlign: TextAlign.center),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Chiudi'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showTimerSvegliaDialog(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (_) => TimerSvegliaDialog(audioHandler: audioHandler),
+    );
+  }
+
+  void _openPlaylist(BuildContext context) {
+    Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => const PlaylistScreen()),
+    );
+  }
+
+  void _condividi(MediaItem? item) {
+    final title = item?.title ?? RadioConfig.stationName;
+    final artist = item?.artist ?? '';
+    final brano = (title.isNotEmpty && title != RadioConfig.stationName)
+        ? '"$title"${artist.isNotEmpty ? ' di $artist' : ''}'
+        : null;
+    final testo = brano != null
+        ? 'Sto ascoltando $brano su ${RadioConfig.stationName}!\n${RadioConfig.website}'
+        : 'Sto ascoltando ${RadioConfig.stationName}!\n${RadioConfig.website}';
+    Share.share(testo);
   }
 
   @override
@@ -24,84 +70,139 @@ class NowPlayingScreen extends StatelessWidget {
       body: Stack(
         fit: StackFit.expand,
         children: [
-          Image.asset(_seasonalBackground(), fit: BoxFit.cover),
-          Container(color: Colors.black.withOpacity(0.45)),
+          // Sfondo stagionale: immagine remota, stessa logica di
+          // RadioConfig.sfondoStagionale() nell'app Android.
+          CachedNetworkImage(
+            imageUrl: RadioConfig.sfondoStagionale(),
+            fit: BoxFit.cover,
+            errorWidget: (_, __, ___) => Container(color: const Color(0xFF12151C)),
+          ),
+          // Overlay scuro semi-trasparente, stesso valore di MainActivity.kt (0x99121212)
+          Container(color: const Color(0x99121212)),
           SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.all(24.0),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(16),
-                    child: StreamBuilder<MediaItem?>(
-                      stream: audioHandler.mediaItem,
-                      builder: (context, snapshot) {
-                        final artUri = snapshot.data?.artUri?.toString() ??
-                            RadioConfig.logoAssetPath;
-                        if (artUri.startsWith('http')) {
-                          return CachedNetworkImage(
-                            imageUrl: artUri,
-                            width: 260,
-                            height: 260,
-                            fit: BoxFit.cover,
-                            placeholder: (_, __) => Image.asset(
-                              RadioConfig.logoAssetPath,
-                              width: 260,
-                              height: 260,
-                            ),
-                            errorWidget: (_, __, ___) => Image.asset(
-                              RadioConfig.logoAssetPath,
-                              width: 260,
-                              height: 260,
-                            ),
-                          );
-                        }
-                        return Image.asset(artUri, width: 260, height: 260);
-                      },
-                    ),
-                  ),
-                  const SizedBox(height: 24),
-                  StreamBuilder<MediaItem?>(
-                    stream: audioHandler.mediaItem,
-                    builder: (context, snapshot) {
-                      final item = snapshot.data;
-                      return Column(
+            child: Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Row(
                         children: [
-                          Text(
-                            item?.title ?? RadioConfig.stationName,
-                            textAlign: TextAlign.center,
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 22,
-                              fontWeight: FontWeight.bold,
-                            ),
+                          IconButton(
+                            icon: const Icon(Icons.queue_music, color: Colors.white, size: 32),
+                            tooltip: 'Playlist',
+                            onPressed: () => _openPlaylist(context),
                           ),
-                          const SizedBox(height: 6),
-                          Text(
-                            item?.artist ?? '',
-                            textAlign: TextAlign.center,
-                            style: const TextStyle(color: Colors.white70, fontSize: 16),
+                          IconButton(
+                            icon: const Icon(Icons.access_alarm, color: Colors.white, size: 30),
+                            tooltip: 'Timer e sveglia',
+                            onPressed: () => _showTimerSvegliaDialog(context),
+                          ),
+                          const CastAirplayButton(),
+                        ],
+                      ),
+                      Row(
+                        children: [
+                          StreamBuilder<MediaItem?>(
+                            stream: audioHandler.mediaItem,
+                            builder: (context, snapshot) {
+                              return IconButton(
+                                icon: const Icon(Icons.share, color: Colors.white, size: 28),
+                                tooltip: 'Condividi',
+                                onPressed: () => _condividi(snapshot.data),
+                              );
+                            },
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.info_outline, color: Color(0xFF4FC3F7), size: 32),
+                            tooltip: 'Informazioni sviluppatore',
+                            onPressed: () => _showInfoDialog(context),
                           ),
                         ],
-                      );
-                    },
+                      ),
+                    ],
                   ),
-                  const SizedBox(height: 32),
-                  StreamBuilder<PlaybackState>(
-                    stream: audioHandler.playbackState,
-                    builder: (context, snapshot) {
-                      final playing = snapshot.data?.playing ?? false;
-                      return IconButton(
-                        iconSize: 72,
-                        color: Colors.white,
-                        icon: Icon(playing ? Icons.pause_circle_filled : Icons.play_circle_filled),
-                        onPressed: () => playing ? audioHandler.pause() : audioHandler.play(),
-                      );
-                    },
+                ),
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.all(24.0),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(16),
+                          child: StreamBuilder<MediaItem?>(
+                            stream: audioHandler.mediaItem,
+                            builder: (context, snapshot) {
+                              final artUri = snapshot.data?.artUri?.toString() ??
+                                  RadioConfig.fallbackLogoUrl;
+                              return CachedNetworkImage(
+                                imageUrl: artUri,
+                                width: 260,
+                                height: 260,
+                                fit: BoxFit.cover,
+                                errorWidget: (_, __, ___) => Container(
+                                  width: 260,
+                                  height: 260,
+                                  color: Colors.white24,
+                                ),
+                              );
+                            },
+                          ),
+                        ),
+                        const SizedBox(height: 28),
+                        StreamBuilder<MediaItem?>(
+                          stream: audioHandler.mediaItem,
+                          builder: (context, snapshot) {
+                            final item = snapshot.data;
+                            return Column(
+                              children: [
+                                Text(
+                                  item?.title ?? RadioConfig.stationName,
+                                  textAlign: TextAlign.center,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 22,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                                const SizedBox(height: 6),
+                                Text(
+                                  item?.artist ?? RadioConfig.tagline,
+                                  textAlign: TextAlign.center,
+                                  style: const TextStyle(color: Colors.white70, fontSize: 16),
+                                ),
+                              ],
+                            );
+                          },
+                        ),
+                        const SizedBox(height: 36),
+                        StreamBuilder<PlaybackState>(
+                          stream: audioHandler.playbackState,
+                          builder: (context, snapshot) {
+                            final playing = snapshot.data?.playing ?? false;
+                            return Container(
+                              width: 72,
+                              height: 72,
+                              decoration: const BoxDecoration(
+                                color: Colors.white,
+                                shape: BoxShape.circle,
+                              ),
+                              child: IconButton(
+                                iconSize: 36,
+                                color: const Color(0xFF12151C),
+                                icon: Icon(playing ? Icons.pause : Icons.play_arrow),
+                                onPressed: () => playing ? audioHandler.pause() : audioHandler.play(),
+                              ),
+                            );
+                          },
+                        ),
+                      ],
+                    ),
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
           ),
         ],

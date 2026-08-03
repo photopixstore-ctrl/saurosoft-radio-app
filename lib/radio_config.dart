@@ -2,35 +2,54 @@
 /// RADIO CONFIG - UNICO FILE DA MODIFICARE PER OGNI CLIENTE
 /// ============================================================
 /// Stesso concetto di RadioConfig.kt nella versione Android nativa:
-/// per rebrandare l'app per un nuovo cliente radio, basta cambiare
+/// per rebrandare l'app con un altro cliente radio, basta cambiare
 /// i valori qui sotto. Nessun altro file va toccato.
 /// ============================================================
 class RadioConfig {
-  // Nome stazione mostrato in app, notifiche, lock screen, Android Auto, CarPlay
   static const String stationName = 'Saurosoft Radio';
+  static const String tagline = 'Le migliori hits di ieri e di oggi';
+  static const String website = 'https://www.saurosoftradio.it';
 
-  // URL diretto dello stream audio (mp3/aac) - SOSTITUIRE con quello reale usato nell'app Android
-  static const String streamUrl = 'https://TODO-inserisci-url-stream-reale';
+  // URL dello streaming audio diretto (stesso usato nell'app Android)
+  static const String streamUrl =
+      'https://nr11.newradio.it/proxy/saurosoftfolgaria?mp=/stream';
 
-  // Endpoint current.php che restituisce artista/titolo in tempo reale - stesso usato per Alexa
-  static const String metadataUrl = 'https://TODO-inserisci-url-current-php-reale';
+  // Endpoint che restituisce i metadati live (title, artist, year, cover)
+  static const String metadataUrl = 'https://www.saurosoftradio.it/api/current.php';
 
-  // Logo di fallback quando iTunes/Deezer non trovano una cover
-  static const String logoAssetPath = 'assets/images/logo.png';
+  // Base per gli sfondi stagionali (stesso set gia' usato nella skill Alexa
+  // e nell'app Android): sono immagini remote, non incluse nel progetto.
+  static const String sfondiBaseUrl = 'https://www.saurosoftradio.it/loghiradio/';
 
-  // Identificativi app (devono combaciare con quanto creato su Play Console / App Store Connect)
-  static const String androidApplicationId = 'it.photopix.saurosoftradio';
-  static const String iosBundleId = 'it.photopix.saurosoftradio';
+  /// Restituisce l'URL dello sfondo stagionale in base al mese corrente.
+  static String sfondoStagionale() {
+    final mese = DateTime.now().month;
+    if (mese >= 3 && mese <= 5) return '${sfondiBaseUrl}primavera.jpg';
+    if (mese >= 6 && mese <= 8) return '${sfondiBaseUrl}estate.jpg';
+    if (mese >= 9 && mese <= 11) return '${sfondiBaseUrl}autunno.jpg';
+    return '${sfondiBaseUrl}inverno.jpg';
+  }
+
+  // Logo di fallback quando current.php non restituisce una copertina valida
+  static const String fallbackLogoUrl =
+      'https://www.saurosoft.it/radio/loghiradio/logoradio468x360.jpg';
+
+  // Identificativi app - quelli gia' generati con `flutter create --org it.photopix`.
+  // NOTA: sono diversi dal package "it.saurosoft.radio" dell'app Android nativa
+  // esistente. Questo va bene se questa e' una pubblicazione nuova/separata;
+  // se invece un giorno vuoi che questa app SOSTITUISCA quella nativa sul Play
+  // Store (stesso annuncio, aggiornamento), l'applicationId Android dovra'
+  // combaciare esattamente con "it.saurosoft.radio" - fammelo sapere, e' una
+  // modifica da fare prima di pubblicare, non dopo.
+  static const String androidApplicationId = 'it.photopix.saurosoft_radio';
+  static const String iosBundleId = 'it.photopix.saurosoft_radio';
 
   // Intervallo di polling dei metadati (secondi) - stesso valore usato in Android
   static const int metadataPollIntervalSeconds = 12;
 
   // Testo mostrato nella sezione "Info" dell'app
   static const String infoText =
-      'Realizzato da Photopix - Via Filzi 7, Nomi di Trento (TN) - www.photopix.it';
-
-  // Coordinate stazione (usate anche per Amazon Radio Skills Kit)
-  static const double stationLat = 45.933;
-  static const double stationLon = 11.067;
-  static const String stationGenre = 'top';
+      'App sviluppata da Photopix\nwww.photopix.it\nvia Filzi 7, 38060 Nomi (TN)\ntel. 0464.350707';
+  static const String infoLogoUrl =
+      'https://www.photopix.it/sito/wp-content/uploads/2019/11/logofooter2.png';
 }

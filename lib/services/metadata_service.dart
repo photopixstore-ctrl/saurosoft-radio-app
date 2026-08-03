@@ -3,19 +3,17 @@ import 'package:http/http.dart' as http;
 import '../radio_config.dart';
 import '../models/now_playing.dart';
 
-/// Legge artista/titolo dal current.php, replicando la logica gia'
-/// usata nella skill Alexa: aggiunge un timestamp (?_a=) per evitare
-/// che eventuali cache intermedie restituiscano dati vecchi.
+/// Legge titolo/artista/copertina da current.php - stesso endpoint
+/// gia' usato dalla skill Alexa e dall'app Android (NowPlaying.kt).
+/// La copertina arriva gia' risolta dal server: qui non serve fare
+/// nessuna ricerca aggiuntiva su iTunes/Deezer lato app.
 class MetadataService {
   Future<NowPlaying> fetchNowPlaying() async {
     final timestamp = DateTime.now().millisecondsSinceEpoch;
-    final uri = Uri.parse('${RadioConfig.metadataUrl}?_a=$timestamp');
+    final uri = Uri.parse('${RadioConfig.metadataUrl}?t=$timestamp');
 
     try {
-      final response = await http
-          .get(uri)
-          .timeout(const Duration(seconds: 5));
-
+      final response = await http.get(uri).timeout(const Duration(seconds: 4));
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body) as Map<String, dynamic>;
         return NowPlaying.fromJson(data);
@@ -23,6 +21,6 @@ class MetadataService {
     } catch (_) {
       // In caso di errore di rete/timeout si mantiene lo stato precedente
     }
-    return NowPlaying.empty();
+    return NowPlaying.fallback();
   }
 }
