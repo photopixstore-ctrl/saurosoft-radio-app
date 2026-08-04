@@ -52,17 +52,21 @@ class NowPlayingScreen extends StatelessWidget {
     );
   }
 
-  void _condividi(MediaItem? item) {
-    final title = item?.title ?? RadioConfig.stationName;
-    final artist = item?.artist ?? '';
-    final brano = (title.isNotEmpty && title != RadioConfig.stationName)
-        ? '"$title"${artist.isNotEmpty ? ' di $artist' : ''}'
-        : null;
-    final testo = brano != null
-        ? 'Sto ascoltando $brano su ${RadioConfig.stationName}!\n${RadioConfig.website}'
-        : 'Sto ascoltando ${RadioConfig.stationName}!\n${RadioConfig.website}';
-    Share.share(testo);
-  }
+    void _condividi(BuildContext context, MediaItem? item) {
+          final title = item?.title ?? RadioConfig.stationName;
+          final artist = item?.artist ?? '';
+          final brano = (title.isNotEmpty && title != RadioConfig.stationName)
+                    ? '"$title"${artist.isNotEmpty ? ' di $artist' : ''}'
+                              : null;
+          final testo = brano != null
+                    ? 'Sto ascoltando $brano su ${RadioConfig.stationName}!\n${RadioConfig.website}'
+                    : 'Sto ascoltando ${RadioConfig.stationName}!\n${RadioConfig.website}';
+          final box = context.findRenderObject() as RenderBox?;
+          final origin = box != null ? (box.localToGlobal(Offset.zero) & box.size) : null;
+          SharePlus.instance.share(
+                  ShareParams(text: testo, sharePositionOrigin: origin),
+                );
+    }
 
   @override
   Widget build(BuildContext context) {
@@ -110,7 +114,7 @@ class NowPlayingScreen extends StatelessWidget {
                               return IconButton(
                                 icon: const Icon(Icons.share, color: Colors.white, size: 28),
                                 tooltip: 'Condividi',
-                                onPressed: () => _condividi(snapshot.data),
+                                                onPressed: () => _condividi(context, snapshot.data),
                               );
                             },
                           ),
