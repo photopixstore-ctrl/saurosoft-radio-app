@@ -70,7 +70,7 @@
 <array>
 	<string>audio</string>
 </array>
-<key>CFBundleDisplayName</key>
-<string>Saurosoft Radio</string>
+<key>NSMicrophoneUsageDescription</key>
+<string>Saurosoft Radio non registra mai audio dal microfono. L'autorizzazione può essere richiesta dal sistema per la gestione della riproduzione in background su alcuni accessori audio Bluetooth, ma non viene mai utilizzata per registrare.</string>
 </dict>
 </plist>
