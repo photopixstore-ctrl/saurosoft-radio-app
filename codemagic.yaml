@@ -12,7 +12,7 @@ workflows:
         # (Team settings > Code signing identities). Deve combaciare
         # esattamente col nome che darai in quella schermata.
         distribution_type: app_store
-        bundle_identifier: it.photopix.saurosoft_radio
+        bundle_identifier: it.photopix.saurosoft-radio
       vars:
         # ID numerico della tua app, si trova in App Store Connect
         # dopo aver creato la scheda app (My Apps > la tua app > General > App Information)
