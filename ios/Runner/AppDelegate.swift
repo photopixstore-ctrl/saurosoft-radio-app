@@ -14,7 +14,7 @@ import UIKit
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
 
     if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "AirplayButtonPlugin") {
-      registrar.registerViewFactory(AirplayButtonFactory(), withId: "saurosoft_airplay_button")
+      registrar.register(AirplayButtonFactory(), withId: "saurosoft_airplay_button")
     }
   }
 }
