@@ -16,7 +16,7 @@ workflows:
       vars:
         # ID numerico della tua app, si trova in App Store Connect
         # dopo aver creato la scheda app (My Apps > la tua app > General > App Information)
-        APP_STORE_APPLE_ID: 0000000000
+        APP_STORE_APPLE_ID: 6797857543
     integrations:
       # Nome dell'integrazione App Store Connect creata in Codemagic
       # (Team settings > Integrations > App Store Connect)
