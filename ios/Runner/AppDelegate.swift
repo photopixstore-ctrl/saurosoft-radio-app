@@ -12,5 +12,8 @@ import UIKit
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
+
+    let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "AirplayButtonPlugin")
+    registrar.registerViewFactory(AirplayButtonFactory(), withId: "saurosoft_airplay_button")
   }
 }
