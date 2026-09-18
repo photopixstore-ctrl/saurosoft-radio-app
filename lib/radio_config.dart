@@ -10,9 +10,10 @@ class RadioConfig {
   static const String tagline = 'Le migliori hits di ieri e di oggi';
   static const String website = 'https://www.saurosoftradio.it';
 
-  // URL dello streaming audio diretto (stesso usato nell'app Android)
+  // URL dello streaming audio diretto (AzuraCast su VPS Contabo,
+  // sostituisce il vecchio host nr11.newradio.it dismesso con la migrazione)
   static const String streamUrl =
-      'https://nr11.newradio.it/proxy/saurosoftfolgaria?mp=/stream';
+      'https://streaming.saurosoftradio.it/listen/saurosoft_radio/radio.mp3';
 
   // Endpoint che restituisce i metadati live (title, artist, year, cover)
   static const String metadataUrl = 'https://www.saurosoftradio.it/api/current.php';
