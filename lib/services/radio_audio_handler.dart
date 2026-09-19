@@ -21,6 +21,8 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
 
   Timer? _pollTimer;
   Timer? _sleepTimer;
+  Timer? _bufferingWatchdog;
+  StreamSubscription<ProcessingState>? _processingStateSub;
   bool _wasPlayingBeforeError = false;
   String _lastArtist = '';
   String _lastTitle = '';
@@ -53,6 +55,24 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       },
       onError: (Object e, StackTrace st) => _handleStreamError(),
     );
+
+    // Su una breve interruzione di rete (es. galleria in auto) AVPlayer
+    // (iOS) spesso NON emette mai un errore esplicito: resta bloccato in
+    // "buffering" in attesa di dati che non arrivano piu', senza che
+    // playbackEventStream.onError scatti mai. Questo watchdog copre quel
+    // caso: se restiamo in buffering troppo a lungo mentre dovremmo star
+    // suonando, trattiamo la cosa come un errore e ricarichiamo lo stream.
+    _processingStateSub = _player.processingStateStream.listen((state) {
+      if (state == ProcessingState.buffering && _wasPlayingBeforeError) {
+        _bufferingWatchdog ??= Timer(const Duration(seconds: 10), () {
+          _bufferingWatchdog = null;
+          _handleStreamError();
+        });
+      } else {
+        _bufferingWatchdog?.cancel();
+        _bufferingWatchdog = null;
+      }
+    });
 
     mediaItem.add(MediaItem(
       id: RadioConfig.streamUrl,
@@ -145,6 +165,8 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   @override
   Future<void> pause() async {
     _wasPlayingBeforeError = false;
+    _bufferingWatchdog?.cancel();
+    _bufferingWatchdog = null;
     // Stesso comportamento di LiveOnlyPlayer.pause(): stop vero, non una
     // pausa che tiene il buffer, cosi' alla ripresa si riparte dal vivo.
     await _player.stop();
@@ -153,6 +175,8 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   @override
   Future<void> stop() async {
     _wasPlayingBeforeError = false;
+    _bufferingWatchdog?.cancel();
+    _bufferingWatchdog = null;
     await _player.stop();
     _pollTimer?.cancel();
     return super.stop();
@@ -192,6 +216,8 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   void dispose() {
     _pollTimer?.cancel();
     _sleepTimer?.cancel();
+    _bufferingWatchdog?.cancel();
+    _processingStateSub?.cancel();
     _player.dispose();
   }
 }
