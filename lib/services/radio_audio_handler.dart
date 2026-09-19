@@ -16,7 +16,27 @@ import 'metadata_service.dart';
 /// Nota CarPlay: l'entitlement "com.apple.developer.carplay-audio" va
 /// richiesto separatamente ad Apple (vedi SETUP_MAC.md).
 class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
-  final AudioPlayer _player = AudioPlayer();
+  // Tiene sempre ~15s di audio gia' scaricato ma non ancora suonato
+  // (il server Icecast manda gia' un burst iniziale di ~15s per
+  // riempirlo subito). Cosi' un buco di rete breve (es. galleria in
+  // auto) viene assorbito dal buffer e non si sente affatto, invece di
+  // aspettare che l'audio si interrompa per poi riconnettersi.
+  static const _forwardBuffer = Duration(seconds: 15);
+
+  final AudioPlayer _player = AudioPlayer(
+    audioLoadConfiguration: AudioLoadConfiguration(
+      darwinLoadControl: DarwinLoadControl(
+        automaticallyWaitsToMinimizeStalling: false,
+        preferredForwardBufferDuration: _forwardBuffer,
+      ),
+      androidLoadControl: AndroidLoadControl(
+        minBufferDuration: _forwardBuffer,
+        maxBufferDuration: const Duration(seconds: 30),
+        bufferForPlaybackDuration: _forwardBuffer,
+        bufferForPlaybackAfterRebufferDuration: _forwardBuffer,
+      ),
+    ),
+  );
   final MetadataService _metadataService = MetadataService();
 
   Timer? _pollTimer;
@@ -56,15 +76,18 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       onError: (Object e, StackTrace st) => _handleStreamError(),
     );
 
-    // Su una breve interruzione di rete (es. galleria in auto) AVPlayer
-    // (iOS) spesso NON emette mai un errore esplicito: resta bloccato in
-    // "buffering" in attesa di dati che non arrivano piu', senza che
-    // playbackEventStream.onError scatti mai. Questo watchdog copre quel
-    // caso: se restiamo in buffering troppo a lungo mentre dovremmo star
-    // suonando, trattiamo la cosa come un errore e ricarichiamo lo stream.
+    // Il buffer di ~15s (vedi _forwardBuffer) assorbe da solo i buchi di
+    // rete brevi: se il player entra comunque in "buffering" vuol dire
+    // che quel margine e' gia' stato consumato del tutto (interruzione
+    // piu' lunga del previsto), e su iOS AVPlayer spesso NON emette mai
+    // un errore esplicito in quel caso - resta bloccato in attesa senza
+    // che playbackEventStream.onError scatti mai. Questo watchdog copre
+    // quel caso: se restiamo in buffering troppo a lungo mentre dovremmo
+    // star suonando, trattiamo la cosa come un errore e ricarichiamo lo
+    // stream.
     _processingStateSub = _player.processingStateStream.listen((state) {
       if (state == ProcessingState.buffering && _wasPlayingBeforeError) {
-        _bufferingWatchdog ??= Timer(const Duration(seconds: 10), () {
+        _bufferingWatchdog ??= Timer(const Duration(seconds: 5), () {
           _bufferingWatchdog = null;
           _handleStreamError();
         });
