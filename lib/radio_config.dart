@@ -15,6 +15,14 @@ class RadioConfig {
   static const String streamUrl =
       'https://streaming.saurosoftradio.it/listen/saurosoft_radio/radio.mp3';
 
+  // File mp3 di riserva ospitato su Serverplan (hosting saurosoftradio.it),
+  // indipendente dalla VPS Contabo che ospita AzuraCast/Icecast: se il live
+  // continua a fallire, il player ci si aggancia esplicitamente finche' il
+  // live non torna disponibile. Aggiornato mensilmente lato server con i
+  // brani piu' ascoltati (vedi memoria "azuracast-saurosoft-radio-infra").
+  static const String backupStreamUrl =
+      'https://www.saurosoftradio.it/wp-content/uploads/saurosoft-radio-backup.mp3';
+
   // Endpoint che restituisce i metadati live (title, artist, year, cover)
   static const String metadataUrl = 'https://www.saurosoftradio.it/api/current.php';
 

@@ -42,8 +42,11 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   Timer? _pollTimer;
   Timer? _sleepTimer;
   Timer? _bufferingWatchdog;
+  Timer? _backupRecoveryTimer;
   StreamSubscription<ProcessingState>? _processingStateSub;
   bool _wasPlayingBeforeError = false;
+  bool _usingBackup = false;
+  int _consecutiveErrors = 0;
   String _lastArtist = '';
   String _lastTitle = '';
 
@@ -95,6 +98,9 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
         _bufferingWatchdog?.cancel();
         _bufferingWatchdog = null;
       }
+      if (state == ProcessingState.ready) {
+        _consecutiveErrors = 0;
+      }
     });
 
     mediaItem.add(MediaItem(
@@ -123,26 +129,74 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     }
   }
 
+  Future<void> _setSource(String url) {
+    return _player.setAudioSource(
+      AudioSource.uri(
+        Uri.parse(url),
+        headers: const {'User-Agent': 'SaurosoftRadioApp/1.0'},
+      ),
+    );
+  }
+
   Future<void> _loadStream() async {
     try {
-      await _player.setAudioSource(
-        AudioSource.uri(
-          Uri.parse(RadioConfig.streamUrl),
-          headers: const {'User-Agent': 'SaurosoftRadioApp/1.0'},
-        ),
-      );
+      await _setSource(RadioConfig.streamUrl);
     } catch (_) {
       _handleStreamError();
     }
   }
 
-  /// Se lo streaming si interrompe per un errore di rete, riproviamo da
-  /// soli dopo 3 secondi - stesso comportamento di PlaybackService.kt.
+  /// Se lo streaming si interrompe, riproviamo da soli dopo 3 secondi -
+  /// stesso comportamento di PlaybackService.kt. Se il LIVE continua a
+  /// fallire (non un singolo blip, errori ripetuti), passiamo
+  /// esplicitamente al file mp3 di riserva (RadioConfig.backupStreamUrl,
+  /// ospitato su Serverplan, indipendente dalla VPS del live). Un
+  /// redirect HTTP lato server non basta: i player audio reali (a
+  /// differenza di un semplice download) spesso non lo seguono in modo
+  /// affidabile a stream gia' aperto - va quindi impostata esplicitamente
+  /// la nuova sorgente qui, con un play() attivo dopo.
   void _handleStreamError() {
+    _consecutiveErrors++;
+    final switchToBackup = !_usingBackup && _consecutiveErrors >= 2;
     Future.delayed(const Duration(seconds: 3), () async {
-      await _loadStream();
-      if (_wasPlayingBeforeError) {
-        await _player.play();
+      try {
+        if (switchToBackup) {
+          _usingBackup = true;
+          await _setSource(RadioConfig.backupStreamUrl);
+          _startBackupRecoveryTimer();
+        } else {
+          await _setSource(
+            _usingBackup ? RadioConfig.backupStreamUrl : RadioConfig.streamUrl,
+          );
+        }
+        if (_wasPlayingBeforeError) await _player.play();
+      } catch (_) {
+        _handleStreamError();
+      }
+    });
+  }
+
+  /// Mentre siamo sul backup, ritentiamo periodicamente il live: se torna
+  /// disponibile, si torna li' automaticamente (play() attivo compreso).
+  void _startBackupRecoveryTimer() {
+    _backupRecoveryTimer?.cancel();
+    _backupRecoveryTimer = Timer.periodic(const Duration(seconds: 30), (_) async {
+      if (!_usingBackup) {
+        _backupRecoveryTimer?.cancel();
+        return;
+      }
+      try {
+        await _setSource(RadioConfig.streamUrl);
+        _usingBackup = false;
+        _consecutiveErrors = 0;
+        _backupRecoveryTimer?.cancel();
+        _backupRecoveryTimer = null;
+        if (_wasPlayingBeforeError) await _player.play();
+      } catch (_) {
+        // Live ancora giu': il tentativo sopra ha rimpiazzato la
+        // sorgente, va ripristinato il backup e si riprova al prossimo giro.
+        await _setSource(RadioConfig.backupStreamUrl);
+        if (_wasPlayingBeforeError) await _player.play();
       }
     });
   }
@@ -177,9 +231,15 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     _wasPlayingBeforeError = true;
     // Stesso comportamento di LiveOnlyPlayer.play(): se il player e' in
     // stato idle (dopo un pause "vero" o un errore), ricarica lo stream
-    // da zero invece di riprendere un buffer vecchio.
+    // da zero invece di riprendere un buffer vecchio. Un play manuale
+    // riparte sempre dal LIVE, anche se l'ultima sessione era finita sul
+    // backup.
     if (_player.processingState == ProcessingState.idle ||
         _player.processingState == ProcessingState.completed) {
+      _usingBackup = false;
+      _consecutiveErrors = 0;
+      _backupRecoveryTimer?.cancel();
+      _backupRecoveryTimer = null;
       await _loadStream();
     }
     await _player.play();
@@ -190,6 +250,8 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     _wasPlayingBeforeError = false;
     _bufferingWatchdog?.cancel();
     _bufferingWatchdog = null;
+    _backupRecoveryTimer?.cancel();
+    _backupRecoveryTimer = null;
     // Stesso comportamento di LiveOnlyPlayer.pause(): stop vero, non una
     // pausa che tiene il buffer, cosi' alla ripresa si riparte dal vivo.
     await _player.stop();
@@ -200,6 +262,8 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     _wasPlayingBeforeError = false;
     _bufferingWatchdog?.cancel();
     _bufferingWatchdog = null;
+    _backupRecoveryTimer?.cancel();
+    _backupRecoveryTimer = null;
     await _player.stop();
     _pollTimer?.cancel();
     return super.stop();
@@ -240,6 +304,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     _pollTimer?.cancel();
     _sleepTimer?.cancel();
     _bufferingWatchdog?.cancel();
+    _backupRecoveryTimer?.cancel();
     _processingStateSub?.cancel();
     _player.dispose();
   }
