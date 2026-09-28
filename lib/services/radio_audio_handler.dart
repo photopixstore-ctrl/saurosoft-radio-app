@@ -93,8 +93,20 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     // quel caso: se restiamo in buffering troppo a lungo mentre dovremmo
     // star suonando, trattiamo la cosa come un errore e ricarichiamo lo
     // stream.
+    //
+    // NON si applica pero' mentre siamo sul backup (_usingBackup): quello
+    // e' un file mp3 finito su hosting normale, non uno stream live - un
+    // rallentamento del download e' un normale "buffering" che il player
+    // gestisce da solo riprendendo da dove si era fermato, non un segnale
+    // che la sorgente e' morta. Trattarlo come un errore e ricaricare da
+    // capo butta via il buffer gia' scaricato e puo' creare un ciclo
+    // "parte, si blocca, riparte da zero" (bug osservato in un test reale
+    // il 28/9: il passaggio al backup partiva ma si fermava dopo pochi
+    // secondi in silenzio totale).
     _processingStateSub = _player.processingStateStream.listen((state) {
-      if (state == ProcessingState.buffering && _wasPlayingBeforeError) {
+      if (state == ProcessingState.buffering &&
+          _wasPlayingBeforeError &&
+          !_usingBackup) {
         _bufferingWatchdog ??= Timer(const Duration(seconds: 5), () {
           _bufferingWatchdog = null;
           _handleStreamError();
