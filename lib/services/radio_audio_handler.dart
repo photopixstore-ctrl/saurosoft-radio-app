@@ -106,6 +106,18 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       if (state == ProcessingState.ready) {
         _consecutiveErrors = 0;
       }
+      // Se il server chiude la connessione "pulito" (es. Icecast fermato
+      // del tutto, non solo un buco di rete), il player spesso lo legge
+      // come fine naturale dello stream ("completed", come un file
+      // arrivato in fondo) invece che come errore - playbackEventStream
+      // .onError non scatta MAI in questo caso. Per una radio live non
+      // esiste una fine naturale: se arriviamo a "completed" mentre
+      // dovremmo star suonando, e' un'interruzione a tutti gli effetti e
+      // va trattata come tale (stesso percorso retry/backup degli errori
+      // espliciti).
+      if (state == ProcessingState.completed && _wasPlayingBeforeError) {
+        _handleStreamError();
+      }
     });
 
     await _watchCarPlayDisconnection();
