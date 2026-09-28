@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:audio_service/audio_service.dart';
+import 'package:audio_session/audio_session.dart';
 import 'package:just_audio/just_audio.dart';
 import '../radio_config.dart';
 import 'metadata_service.dart';
@@ -43,9 +44,13 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   Timer? _sleepTimer;
   Timer? _bufferingWatchdog;
   Timer? _backupRecoveryTimer;
+  Timer? _carPlayWaitTimeout;
   StreamSubscription<ProcessingState>? _processingStateSub;
+  StreamSubscription<void>? _becomingNoisySub;
+  StreamSubscription<void>? _devicesChangedSub;
   bool _wasPlayingBeforeError = false;
   bool _usingBackup = false;
+  bool _waitingForCarPlay = false;
   int _consecutiveErrors = 0;
   String _lastArtist = '';
   String _lastTitle = '';
@@ -103,6 +108,8 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       }
     });
 
+    await _watchCarPlayDisconnection();
+
     mediaItem.add(MediaItem(
       id: RadioConfig.streamUrl,
       title: RadioConfig.stationName,
@@ -112,6 +119,40 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
 
     await _loadStream();
     _startMetadataPolling();
+  }
+
+  /// Scollegare CarPlay (o le cuffie) e' un cambio di rotta audio, non un
+  /// "errore": iOS mette in pausa da solo (comportamento standard Apple,
+  /// per non far esplodere l'audio a sorpresa dallo speaker del telefono)
+  /// e NON riparte da solo - serve tocco manuale. Su richiesta esplicita,
+  /// facciamo un'eccezione MIRATA a CarPlay: se si ricollega entro 2
+  /// minuti (es. un buco di Bluetooth/USB mentre si guida), riprendiamo
+  /// da soli. Le cuffie restano invece con il comportamento standard.
+  Future<void> _watchCarPlayDisconnection() async {
+    final session = await AudioSession.instance;
+
+    _becomingNoisySub = session.becomingNoisyEventStream.listen((_) {
+      if (!_wasPlayingBeforeError) return;
+      _waitingForCarPlay = true;
+      _carPlayWaitTimeout?.cancel();
+      _carPlayWaitTimeout = Timer(const Duration(minutes: 2), () {
+        _waitingForCarPlay = false;
+      });
+    });
+
+    _devicesChangedSub = session.devicesChangedEventStream.listen((_) async {
+      if (!_waitingForCarPlay) return;
+      final devices = await session.getDevices();
+      final carPlayIsBack = devices.any(
+        (d) => d.isOutput && d.type == AudioDeviceType.carAudio,
+      );
+      if (carPlayIsBack) {
+        _waitingForCarPlay = false;
+        _carPlayWaitTimeout?.cancel();
+        _carPlayWaitTimeout = null;
+        await _player.play();
+      }
+    });
   }
 
   AudioProcessingState _mapProcessingState(ProcessingState state) {
@@ -252,6 +293,9 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     _bufferingWatchdog = null;
     _backupRecoveryTimer?.cancel();
     _backupRecoveryTimer = null;
+    _waitingForCarPlay = false;
+    _carPlayWaitTimeout?.cancel();
+    _carPlayWaitTimeout = null;
     // Stesso comportamento di LiveOnlyPlayer.pause(): stop vero, non una
     // pausa che tiene il buffer, cosi' alla ripresa si riparte dal vivo.
     await _player.stop();
@@ -264,6 +308,9 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     _bufferingWatchdog = null;
     _backupRecoveryTimer?.cancel();
     _backupRecoveryTimer = null;
+    _waitingForCarPlay = false;
+    _carPlayWaitTimeout?.cancel();
+    _carPlayWaitTimeout = null;
     await _player.stop();
     _pollTimer?.cancel();
     return super.stop();
@@ -305,7 +352,10 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     _sleepTimer?.cancel();
     _bufferingWatchdog?.cancel();
     _backupRecoveryTimer?.cancel();
+    _carPlayWaitTimeout?.cancel();
     _processingStateSub?.cancel();
+    _becomingNoisySub?.cancel();
+    _devicesChangedSub?.cancel();
     _player.dispose();
   }
 }
