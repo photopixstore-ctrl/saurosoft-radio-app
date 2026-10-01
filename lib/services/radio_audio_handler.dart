@@ -174,9 +174,28 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
         _waitingForCarPlay = false;
         _carPlayWaitTimeout?.cancel();
         _carPlayWaitTimeout = null;
-        await _player.play();
+        await _resumeAfterCarPlayReconnect();
       }
     });
+  }
+
+  /// Il riaggancio CarPlay puo' avvenire anche dopo 1-2 minuti a rete
+  /// sospesa (iOS sospende il networking in background): un semplice
+  /// _player.play() spesso fa ripartire lo stato "playing" nell'interfaccia
+  /// senza che arrivi pero' piu' nessun dato, perche' riprende la stessa
+  /// connessione HTTP ormai morta invece di aprirne una nuova (bug
+  /// segnalato da test reale in auto l'1/10: play acceso ma silenzio).
+  /// Ricarichiamo quindi la sorgente da zero - stessa logica usata da
+  /// play() per la ripresa manuale - prima di suonare.
+  Future<void> _resumeAfterCarPlayReconnect() async {
+    try {
+      await _setSource(
+        _usingBackup ? RadioConfig.backupStreamUrl : RadioConfig.streamUrl,
+      );
+      await _player.play();
+    } catch (_) {
+      _handleStreamError();
+    }
   }
 
   AudioProcessingState _mapProcessingState(ProcessingState state) {
