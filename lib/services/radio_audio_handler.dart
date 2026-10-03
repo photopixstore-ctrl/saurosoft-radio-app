@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'package:audio_service/audio_service.dart';
 import 'package:audio_session/audio_session.dart';
+import 'package:http/http.dart' as http;
 import 'package:just_audio/just_audio.dart';
 import '../radio_config.dart';
+import 'diag_log.dart';
 import 'metadata_service.dart';
 
 /// Cuore dell'app: un solo AudioHandler che alimenta contemporaneamente
@@ -10,24 +12,30 @@ import 'metadata_service.dart';
 /// CarPlay. Equivalente cross-platform di PlaybackService.kt.
 ///
 /// Stessa logica "live only" della versione Android (LiveOnlyPlayer):
-/// pause() ferma davvero lo stream (non tiene il buffer), play() riapre
-/// una connessione fresca - cosi' non si sente mai audio "vecchio" dopo
-/// una pausa lunga.
+/// pause() ferma davvero lo stream (non tiene il buffer) e ogni play()
+/// riapre una connessione fresca - cosi' non si sente mai audio "vecchio"
+/// ne' si riprende una connessione ormai morta.
 ///
-/// Nota CarPlay: l'entitlement "com.apple.developer.carplay-audio" va
-/// richiesto separatamente ad Apple (vedi SETUP_MAC.md).
+/// Recupero errori: UN solo tentativo alla volta (generazione _loadGen) e
+/// un controllo periodico (_livenessTick) che interviene su qualsiasi stato
+/// "bloccato" (loading/buffering/idle/completed) mentre l'utente vuole
+/// ascoltare. Tutto cio' che accade finisce in DiagLog.
 class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   // Tiene sempre ~15s di audio gia' scaricato ma non ancora suonato
   // (il server Icecast manda gia' un burst iniziale di ~15s per
   // riempirlo subito). Cosi' un buco di rete breve (es. galleria in
-  // auto) viene assorbito dal buffer e non si sente affatto, invece di
-  // aspettare che l'audio si interrompa per poi riconnettersi.
+  // auto) viene assorbito dal buffer e non si sente affatto.
+  //
+  // automaticallyWaitsToMinimizeStalling resta TRUE (default Apple): con
+  // false AVPlayer, dopo uno stallo, puo' restare fermo senza ripartire da
+  // solo anche quando il buffer si riempie di nuovo (stato "play acceso
+  // ma nessun audio").
   static const _forwardBuffer = Duration(seconds: 15);
 
   final AudioPlayer _player = AudioPlayer(
     audioLoadConfiguration: AudioLoadConfiguration(
       darwinLoadControl: DarwinLoadControl(
-        automaticallyWaitsToMinimizeStalling: false,
+        automaticallyWaitsToMinimizeStalling: true,
         preferredForwardBufferDuration: _forwardBuffer,
       ),
       androidLoadControl: AndroidLoadControl(
@@ -42,16 +50,25 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
 
   Timer? _pollTimer;
   Timer? _sleepTimer;
-  Timer? _bufferingWatchdog;
+  Timer? _retryTimer;
+  Timer? _livenessTimer;
   Timer? _backupRecoveryTimer;
   Timer? _carPlayWaitTimeout;
-  StreamSubscription<ProcessingState>? _processingStateSub;
+  StreamSubscription<PlayerState>? _playerStateSub;
   StreamSubscription<void>? _becomingNoisySub;
   StreamSubscription<void>? _devicesChangedSub;
+  StreamSubscription<AudioInterruptionEvent>? _interruptionSub;
+
+  // Intento dell'utente: true da play() fino a pause()/stop().
   bool _wasPlayingBeforeError = false;
   bool _usingBackup = false;
   bool _waitingForCarPlay = false;
+  bool _interrupted = false;
+  bool _loadInFlight = false;
+  int _loadGen = 0;
   int _consecutiveErrors = 0;
+  int _tickCount = 0;
+  DateTime _stateSince = DateTime.now();
   String _lastArtist = '';
   String _lastTitle = '';
 
@@ -65,74 +82,52 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   Future<void> _init() async {
+    DiagLog.log('--- avvio handler ---');
+
     _player.playbackEventStream.listen(
       (event) {
+        // Mentre stiamo caricando per un play voluto dall'utente mostriamo
+        // gia' "pausa/caricamento" invece di un play che sembra ignorato.
+        final showPlaying =
+            _player.playing || (_wasPlayingBeforeError && _loadInFlight);
         playbackState.add(playbackState.value.copyWith(
           controls: [
-            if (_player.playing) MediaControl.pause else MediaControl.play,
+            if (showPlaying) MediaControl.pause else MediaControl.play,
             MediaControl.stop,
           ],
           systemActions: const {MediaAction.play, MediaAction.pause},
           androidCompactActionIndices: const [0],
-          processingState: _mapProcessingState(_player.processingState),
-          playing: _player.playing,
+          processingState: (_wasPlayingBeforeError && _loadInFlight)
+              ? AudioProcessingState.loading
+              : _mapProcessingState(_player.processingState),
+          playing: showPlaying,
           updatePosition: _player.position,
           bufferedPosition: _player.bufferedPosition,
           speed: _player.speed,
         ));
       },
-      onError: (Object e, StackTrace st) => _handleStreamError(),
+      onError: (Object e, StackTrace st) {
+        DiagLog.log('playbackEvent error: ${e.runtimeType} $e');
+        _handleStreamError('playbackEvent error');
+      },
     );
 
-    // Il buffer di ~15s (vedi _forwardBuffer) assorbe da solo i buchi di
-    // rete brevi: se il player entra comunque in "buffering" vuol dire
-    // che quel margine e' gia' stato consumato del tutto (interruzione
-    // piu' lunga del previsto), e su iOS AVPlayer spesso NON emette mai
-    // un errore esplicito in quel caso - resta bloccato in attesa senza
-    // che playbackEventStream.onError scatti mai. Questo watchdog copre
-    // quel caso: se restiamo in buffering troppo a lungo mentre dovremmo
-    // star suonando, trattiamo la cosa come un errore e ricarichiamo lo
-    // stream.
-    //
-    // NON si applica pero' mentre siamo sul backup (_usingBackup): quello
-    // e' un file mp3 finito su hosting normale, non uno stream live - un
-    // rallentamento del download e' un normale "buffering" che il player
-    // gestisce da solo riprendendo da dove si era fermato, non un segnale
-    // che la sorgente e' morta. Trattarlo come un errore e ricaricare da
-    // capo butta via il buffer gia' scaricato e puo' creare un ciclo
-    // "parte, si blocca, riparte da zero" (bug osservato in un test reale
-    // il 28/9: il passaggio al backup partiva ma si fermava dopo pochi
-    // secondi in silenzio totale).
-    _processingStateSub = _player.processingStateStream.listen((state) {
-      if (state == ProcessingState.buffering &&
-          _wasPlayingBeforeError &&
-          !_usingBackup) {
-        _bufferingWatchdog ??= Timer(const Duration(seconds: 5), () {
-          _bufferingWatchdog = null;
-          _handleStreamError();
-        });
-      } else {
-        _bufferingWatchdog?.cancel();
-        _bufferingWatchdog = null;
-      }
-      if (state == ProcessingState.ready) {
-        _consecutiveErrors = 0;
-      }
-      // Se il server chiude la connessione "pulito" (es. Icecast fermato
-      // del tutto, non solo un buco di rete), il player spesso lo legge
-      // come fine naturale dello stream ("completed", come un file
-      // arrivato in fondo) invece che come errore - playbackEventStream
-      // .onError non scatta MAI in questo caso. Per una radio live non
-      // esiste una fine naturale: se arriviamo a "completed" mentre
-      // dovremmo star suonando, e' un'interruzione a tutti gli effetti e
-      // va trattata come tale (stesso percorso retry/backup degli errori
-      // espliciti).
-      if (state == ProcessingState.completed && _wasPlayingBeforeError) {
-        _handleStreamError();
+    _playerStateSub = _player.playerStateStream.listen((state) {
+      _stateSince = DateTime.now();
+      DiagLog.log(
+        'state playing=${state.playing} proc=${state.processingState.name} '
+        'pos=${_player.position.inSeconds}s backup=$_usingBackup',
+      );
+      // Il server puo' chiudere la connessione "pulito" (es. Icecast
+      // fermato): il player lo legge come fine naturale ("completed"). Per
+      // una radio live non esiste una fine naturale, quindi e' un'interruzione.
+      if (state.processingState == ProcessingState.completed &&
+          _wasPlayingBeforeError) {
+        _handleStreamError('completed');
       }
     });
 
-    await _watchCarPlayDisconnection();
+    await _watchAudioSession();
 
     mediaItem.add(MediaItem(
       id: RadioConfig.streamUrl,
@@ -141,32 +136,59 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       artUri: Uri.parse(RadioConfig.fallbackLogoUrl),
     ));
 
-    await _loadStream();
+    // Nessun precaricamento dello stream all'avvio: una connessione aperta
+    // senza ascoltare resta ferma mesi... e al primo play si rischia di
+    // riprendere una connessione ormai chiusa dal server. Ogni play() apre
+    // una connessione nuova (e non conta come ascoltatore chi apre l'app).
     _startMetadataPolling();
   }
 
+  /// Interruzioni audio e cambi di rotta (CarPlay/cuffie).
+  ///
   /// Scollegare CarPlay (o le cuffie) e' un cambio di rotta audio, non un
   /// "errore": iOS mette in pausa da solo (comportamento standard Apple,
   /// per non far esplodere l'audio a sorpresa dallo speaker del telefono)
-  /// e NON riparte da solo - serve tocco manuale. Su richiesta esplicita,
-  /// facciamo un'eccezione MIRATA a CarPlay: se si ricollega entro 2
-  /// minuti (es. un buco di Bluetooth/USB mentre si guida), riprendiamo
-  /// da soli. Le cuffie restano invece con il comportamento standard.
-  Future<void> _watchCarPlayDisconnection() async {
+  /// e NON riparte da solo. Su richiesta esplicita, facciamo un'eccezione
+  /// MIRATA a CarPlay: se si ricollega entro 2 minuti (es. un buco di
+  /// Bluetooth/USB mentre si guida), riprendiamo da soli con una connessione
+  /// fresca. Nel frattempo nessun recupero automatico deve partire (altrimenti
+  /// l'audio uscirebbe dallo speaker del telefono). Le cuffie restano con il
+  /// comportamento standard.
+  Future<void> _watchAudioSession() async {
     final session = await AudioSession.instance;
 
+    _interruptionSub = session.interruptionEventStream.listen((event) {
+      DiagLog.log('interruption begin=${event.begin} type=${event.type.name}');
+      // Il "duck" (es. voce del navigatore) abbassa solo il volume.
+      if (event.type == AudioInterruptionType.duck) return;
+      _interrupted = event.begin;
+      _stateSince = DateTime.now();
+    });
+
     _becomingNoisySub = session.becomingNoisyEventStream.listen((_) {
+      DiagLog.log('becomingNoisy (rotta audio persa) wantPlaying=$_wasPlayingBeforeError');
       if (!_wasPlayingBeforeError) return;
       _waitingForCarPlay = true;
+      _loadGen++;
+      _loadInFlight = false;
+      _retryTimer?.cancel();
+      _retryTimer = null;
       _carPlayWaitTimeout?.cancel();
       _carPlayWaitTimeout = Timer(const Duration(minutes: 2), () {
+        DiagLog.log('CarPlay non tornato entro 2 minuti: resto in pausa');
         _waitingForCarPlay = false;
+        _wasPlayingBeforeError = false;
+        _stopLiveness();
       });
     });
 
     _devicesChangedSub = session.devicesChangedEventStream.listen((_) async {
-      if (!_waitingForCarPlay) return;
       final devices = await session.getDevices();
+      final summary = devices
+          .map((d) => '${d.type.name}${d.isOutput ? "(out)" : ""}')
+          .join(',');
+      DiagLog.log('devicesChanged: $summary waitingCarPlay=$_waitingForCarPlay');
+      if (!_waitingForCarPlay) return;
       final carPlayIsBack = devices.any(
         (d) => d.isOutput && d.type == AudioDeviceType.carAudio,
       );
@@ -174,28 +196,13 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
         _waitingForCarPlay = false;
         _carPlayWaitTimeout?.cancel();
         _carPlayWaitTimeout = null;
-        await _resumeAfterCarPlayReconnect();
+        DiagLog.log('CarPlay tornato: riprendo con connessione fresca');
+        _startLiveness();
+        await _loadAndPlay(
+          _usingBackup ? RadioConfig.backupStreamUrl : RadioConfig.streamUrl,
+        );
       }
     });
-  }
-
-  /// Il riaggancio CarPlay puo' avvenire anche dopo 1-2 minuti a rete
-  /// sospesa (iOS sospende il networking in background): un semplice
-  /// _player.play() spesso fa ripartire lo stato "playing" nell'interfaccia
-  /// senza che arrivi pero' piu' nessun dato, perche' riprende la stessa
-  /// connessione HTTP ormai morta invece di aprirne una nuova (bug
-  /// segnalato da test reale in auto l'1/10: play acceso ma silenzio).
-  /// Ricarichiamo quindi la sorgente da zero - stessa logica usata da
-  /// play() per la ripresa manuale - prima di suonare.
-  Future<void> _resumeAfterCarPlayReconnect() async {
-    try {
-      await _setSource(
-        _usingBackup ? RadioConfig.backupStreamUrl : RadioConfig.streamUrl,
-      );
-      await _player.play();
-    } catch (_) {
-      _handleStreamError();
-    }
   }
 
   AudioProcessingState _mapProcessingState(ProcessingState state) {
@@ -222,67 +229,167 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     );
   }
 
-  Future<void> _loadStream() async {
+  /// Carica `url` da zero e, se l'utente vuole ascoltare, avvia la
+  /// riproduzione. E' l'UNICO punto che carica sorgenti per il recupero:
+  /// ogni chiamata invalida le precedenti (_loadGen), cosi' non possono mai
+  /// sovrapporsi due caricamenti che si cancellano a vicenda.
+  Future<void> _loadAndPlay(String url) async {
+    final gen = ++_loadGen;
+    _loadInFlight = true;
+    DiagLog.log('load start -> $url');
     try {
-      await _setSource(RadioConfig.streamUrl);
-    } catch (_) {
-      _handleStreamError();
+      await _setSource(url).timeout(const Duration(seconds: 15));
+      if (gen != _loadGen) return;
+      DiagLog.log('load ok');
+      _loadInFlight = false;
+      if (_wasPlayingBeforeError && !_waitingForCarPlay) _startPlayer();
+    } on PlayerInterruptedException {
+      DiagLog.log('load interrotto (sostituito da uno piu\' recente)');
+    } catch (e) {
+      DiagLog.log('load fallito: ${e.runtimeType} $e');
+      if (gen == _loadGen) {
+        _loadInFlight = false;
+        _handleStreamError('load fallito');
+      }
+    } finally {
+      if (gen == _loadGen) _loadInFlight = false;
     }
   }
 
-  /// Se lo streaming si interrompe, riproviamo da soli dopo 3 secondi -
-  /// stesso comportamento di PlaybackService.kt. Se il LIVE continua a
-  /// fallire (non un singolo blip, errori ripetuti), passiamo
-  /// esplicitamente al file mp3 di riserva (RadioConfig.backupStreamUrl,
-  /// ospitato su Serverplan, indipendente dalla VPS del live). Un
-  /// redirect HTTP lato server non basta: i player audio reali (a
-  /// differenza di un semplice download) spesso non lo seguono in modo
-  /// affidabile a stream gia' aperto - va quindi impostata esplicitamente
-  /// la nuova sorgente qui, con un play() attivo dopo.
-  void _handleStreamError() {
-    _consecutiveErrors++;
-    final switchToBackup = !_usingBackup && _consecutiveErrors >= 2;
-    Future.delayed(const Duration(seconds: 3), () async {
-      try {
-        if (switchToBackup) {
-          _usingBackup = true;
-          await _setSource(RadioConfig.backupStreamUrl);
-          _startBackupRecoveryTimer();
-        } else {
-          await _setSource(
-            _usingBackup ? RadioConfig.backupStreamUrl : RadioConfig.streamUrl,
-          );
-        }
-        if (_wasPlayingBeforeError) await _player.play();
-      } catch (_) {
-        _handleStreamError();
-      }
-    });
+  /// play() del player senza attenderlo (il suo Future termina solo quando
+  /// la riproduzione si ferma) ma senza lasciare errori non gestiti.
+  void _startPlayer() {
+    unawaited(_player.play().catchError((Object e) {
+      DiagLog.log('player.play() errore: ${e.runtimeType} $e');
+    }));
   }
 
-  /// Mentre siamo sul backup, ritentiamo periodicamente il live: se torna
-  /// disponibile, si torna li' automaticamente (play() attivo compreso).
+  /// Qualsiasi segnale di stream interrotto passa da qui. Piu' segnali
+  /// ravvicinati si fondono in un solo tentativo dopo 3 secondi.
+  void _handleStreamError(String why) {
+    DiagLog.log('problema stream: $why');
+    if (!_wasPlayingBeforeError || _waitingForCarPlay) return;
+    if (_retryTimer?.isActive ?? false) return;
+    _retryTimer = Timer(const Duration(seconds: 3), _recover);
+  }
+
+  /// Se il LIVE continua a fallire (errori ripetuti, non un singolo blip),
+  /// passiamo esplicitamente al file mp3 di riserva (RadioConfig
+  /// .backupStreamUrl, su Serverplan, indipendente dalla VPS del live).
+  Future<void> _recover() async {
+    _retryTimer = null;
+    if (!_wasPlayingBeforeError || _waitingForCarPlay) return;
+    _consecutiveErrors++;
+    if (!_usingBackup && _consecutiveErrors >= 2) {
+      _usingBackup = true;
+      _startBackupRecoveryTimer();
+    }
+    DiagLog.log(
+      'recupero #$_consecutiveErrors -> ${_usingBackup ? "BACKUP" : "live"}',
+    );
+    await _loadAndPlay(
+      _usingBackup ? RadioConfig.backupStreamUrl : RadioConfig.streamUrl,
+    );
+  }
+
+  /// Mentre siamo sul backup, controlliamo periodicamente (senza toccare
+  /// la riproduzione in corso) se il live e' tornato; se si', ci si torna.
   void _startBackupRecoveryTimer() {
     _backupRecoveryTimer?.cancel();
     _backupRecoveryTimer = Timer.periodic(const Duration(seconds: 30), (_) async {
       if (!_usingBackup) {
         _backupRecoveryTimer?.cancel();
+        _backupRecoveryTimer = null;
         return;
       }
-      try {
-        await _setSource(RadioConfig.streamUrl);
-        _usingBackup = false;
-        _consecutiveErrors = 0;
-        _backupRecoveryTimer?.cancel();
-        _backupRecoveryTimer = null;
-        if (_wasPlayingBeforeError) await _player.play();
-      } catch (_) {
-        // Live ancora giu': il tentativo sopra ha rimpiazzato la
-        // sorgente, va ripristinato il backup e si riprova al prossimo giro.
-        await _setSource(RadioConfig.backupStreamUrl);
-        if (_wasPlayingBeforeError) await _player.play();
-      }
+      if (!_wasPlayingBeforeError || _waitingForCarPlay || _loadInFlight) return;
+      final up = await _liveIsUp();
+      DiagLog.log('backup: live disponibile? $up');
+      if (!up || !_usingBackup || !_wasPlayingBeforeError) return;
+      _usingBackup = false;
+      _consecutiveErrors = 0;
+      _backupRecoveryTimer?.cancel();
+      _backupRecoveryTimer = null;
+      await _loadAndPlay(RadioConfig.streamUrl);
     });
+  }
+
+  Future<bool> _liveIsUp() async {
+    final client = http.Client();
+    try {
+      final request = http.Request('GET', Uri.parse(RadioConfig.streamUrl))
+        ..headers['User-Agent'] = 'SaurosoftRadioApp/1.0';
+      final response = await client.send(request).timeout(const Duration(seconds: 5));
+      if (response.statusCode != 200) return false;
+      final first = await response.stream.first.timeout(const Duration(seconds: 5));
+      return first.isNotEmpty;
+    } catch (_) {
+      return false;
+    } finally {
+      client.close();
+    }
+  }
+
+  void _startLiveness() {
+    _livenessTimer ??=
+        Timer.periodic(const Duration(seconds: 2), (_) => _livenessTick());
+  }
+
+  void _stopLiveness() {
+    _livenessTimer?.cancel();
+    _livenessTimer = null;
+  }
+
+  /// Controllo periodico: se l'utente vuole ascoltare ma il player resta
+  /// troppo a lungo in uno stato che non produce audio, e' un problema
+  /// anche se nessun errore esplicito e' mai stato emesso (su iOS
+  /// AVPlayer spesso non lo emette).
+  void _livenessTick() {
+    if (!_wasPlayingBeforeError) return;
+    _tickCount++;
+    if (_tickCount % 5 == 0) {
+      DiagLog.log(
+        'health playing=${_player.playing} proc=${_player.processingState.name} '
+        'pos=${_player.position.inSeconds}s buf=${_player.bufferedPosition.inSeconds}s '
+        'backup=$_usingBackup inflight=$_loadInFlight carplay=$_waitingForCarPlay '
+        'interrotto=$_interrupted',
+      );
+    }
+    if (_waitingForCarPlay || _interrupted || _loadInFlight) return;
+    if (_retryTimer?.isActive ?? false) return;
+
+    final state = _player.processingState;
+    final stuck = DateTime.now().difference(_stateSince);
+
+    if (_player.playing && state == ProcessingState.ready) {
+      if (stuck > const Duration(seconds: 10)) _consecutiveErrors = 0;
+      return;
+    }
+
+    if (state == ProcessingState.ready) {
+      // Pronto ma non in riproduzione mentre l'utente vuole ascoltare
+      // (es. attivazione della sessione audio rifiutata): richiede il play.
+      if (stuck > const Duration(seconds: 6)) {
+        _stateSince = DateTime.now();
+        DiagLog.log('pronto ma non in play: rilancio play()');
+        _startPlayer();
+      }
+      return;
+    }
+
+    Duration limit;
+    if (state == ProcessingState.buffering) {
+      // Il backup e' un file finito: un rallentamento e' un normale buffering.
+      limit = _usingBackup ? const Duration(seconds: 25) : const Duration(seconds: 10);
+    } else if (state == ProcessingState.loading) {
+      limit = const Duration(seconds: 12);
+    } else {
+      limit = const Duration(seconds: 4);
+    }
+    if (stuck > limit) {
+      _stateSince = DateTime.now();
+      _handleStreamError('bloccato in ${state.name} da ${stuck.inSeconds}s');
+    }
   }
 
   void _startMetadataPolling() {
@@ -310,35 +417,44 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     ));
   }
 
-  @override
-  Future<void> play() async {
-    _wasPlayingBeforeError = true;
-    // Stesso comportamento di LiveOnlyPlayer.play(): se il player e' in
-    // stato idle (dopo un pause "vero" o un errore), ricarica lo stream
-    // da zero invece di riprendere un buffer vecchio. Un play manuale
-    // riparte sempre dal LIVE, anche se l'ultima sessione era finita sul
-    // backup.
-    if (_player.processingState == ProcessingState.idle ||
-        _player.processingState == ProcessingState.completed) {
-      _usingBackup = false;
-      _consecutiveErrors = 0;
-      _backupRecoveryTimer?.cancel();
-      _backupRecoveryTimer = null;
-      await _loadStream();
-    }
-    await _player.play();
-  }
-
-  @override
-  Future<void> pause() async {
-    _wasPlayingBeforeError = false;
-    _bufferingWatchdog?.cancel();
-    _bufferingWatchdog = null;
+  void _cancelRecoveryState() {
+    _loadGen++;
+    _loadInFlight = false;
+    _retryTimer?.cancel();
+    _retryTimer = null;
     _backupRecoveryTimer?.cancel();
     _backupRecoveryTimer = null;
     _waitingForCarPlay = false;
     _carPlayWaitTimeout?.cancel();
     _carPlayWaitTimeout = null;
+  }
+
+  @override
+  Future<void> play() async {
+    DiagLog.log(
+      'play() richiesto (playing=${_player.playing}, proc=${_player.processingState.name})',
+    );
+    _wasPlayingBeforeError = true;
+    _startLiveness();
+    if (_player.playing && _player.processingState == ProcessingState.ready) {
+      return;
+    }
+    // Un play manuale riparte sempre dal LIVE con una connessione fresca,
+    // anche se l'ultima sessione era finita sul backup.
+    _cancelRecoveryState();
+    _usingBackup = false;
+    _consecutiveErrors = 0;
+    _interrupted = false;
+    _startLiveness();
+    await _loadAndPlay(RadioConfig.streamUrl);
+  }
+
+  @override
+  Future<void> pause() async {
+    DiagLog.log('pause() richiesto');
+    _wasPlayingBeforeError = false;
+    _cancelRecoveryState();
+    _stopLiveness();
     // Stesso comportamento di LiveOnlyPlayer.pause(): stop vero, non una
     // pausa che tiene il buffer, cosi' alla ripresa si riparte dal vivo.
     await _player.stop();
@@ -346,14 +462,10 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
 
   @override
   Future<void> stop() async {
+    DiagLog.log('stop() richiesto');
     _wasPlayingBeforeError = false;
-    _bufferingWatchdog?.cancel();
-    _bufferingWatchdog = null;
-    _backupRecoveryTimer?.cancel();
-    _backupRecoveryTimer = null;
-    _waitingForCarPlay = false;
-    _carPlayWaitTimeout?.cancel();
-    _carPlayWaitTimeout = null;
+    _cancelRecoveryState();
+    _stopLiveness();
     await _player.stop();
     _pollTimer?.cancel();
     return super.stop();
@@ -393,12 +505,14 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   void dispose() {
     _pollTimer?.cancel();
     _sleepTimer?.cancel();
-    _bufferingWatchdog?.cancel();
+    _retryTimer?.cancel();
+    _livenessTimer?.cancel();
     _backupRecoveryTimer?.cancel();
     _carPlayWaitTimeout?.cancel();
-    _processingStateSub?.cancel();
+    _playerStateSub?.cancel();
     _becomingNoisySub?.cancel();
     _devicesChangedSub?.cancel();
+    _interruptionSub?.cancel();
     _player.dispose();
   }
 }

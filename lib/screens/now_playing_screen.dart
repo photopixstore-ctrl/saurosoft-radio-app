@@ -3,6 +3,7 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:share_plus/share_plus.dart';
 import '../radio_config.dart';
+import '../services/diag_log.dart';
 import '../widgets/cast_airplay_button.dart';
 import 'playlist_screen.dart';
 import 'timer_sveglia_dialog.dart';
@@ -31,10 +32,26 @@ class NowPlayingScreen extends StatelessWidget {
         ),
         actions: [
           TextButton(
+            onPressed: () => _condividiLogDiagnostico(context),
+            child: const Text('Condividi log diagnostico'),
+          ),
+          TextButton(
             onPressed: () => Navigator.of(context).pop(),
             child: const Text('Chiudi'),
           ),
         ],
+      ),
+    );
+  }
+
+  void _condividiLogDiagnostico(BuildContext context) {
+    final box = context.findRenderObject() as RenderBox?;
+    final origin = box != null ? (box.localToGlobal(Offset.zero) & box.size) : null;
+    SharePlus.instance.share(
+      ShareParams(
+        text: DiagLog.dump(),
+        subject: 'Saurosoft Radio - log diagnostico',
+        sharePositionOrigin: origin,
       ),
     );
   }
@@ -52,21 +69,26 @@ class NowPlayingScreen extends StatelessWidget {
     );
   }
 
-    void _condividi(BuildContext context, MediaItem? item) {
-          final title = item?.title ?? RadioConfig.stationName;
-          final artist = item?.artist ?? '';
-          final brano = (title.isNotEmpty && title != RadioConfig.stationName)
-                    ? '"$title"${artist.isNotEmpty ? ' di $artist' : ''}'
-                              : null;
-          final testo = brano != null
-                    ? 'Sto ascoltando $brano su ${RadioConfig.stationName}!\n${RadioConfig.website}'
-                    : 'Sto ascoltando ${RadioConfig.stationName}!\n${RadioConfig.website}';
-          final box = context.findRenderObject() as RenderBox?;
-          final origin = box != null ? (box.localToGlobal(Offset.zero) & box.size) : null;
-          SharePlus.instance.share(
-                  ShareParams(text: testo, sharePositionOrigin: origin),
-                );
-    }
+  void _condividi(BuildContext context, MediaItem? item) {
+    final title = item?.title ?? RadioConfig.stationName;
+    final artist = item?.artist ?? '';
+    final brano = (title.isNotEmpty && title != RadioConfig.stationName)
+        ? '"$title"${artist.isNotEmpty ? ' di $artist' : ''}'
+        : null;
+    final testo = brano != null
+        ? 'Sto ascoltando $brano su ${RadioConfig.stationName}!\n${RadioConfig.website}'
+        : 'Sto ascoltando ${RadioConfig.stationName}!\n${RadioConfig.website}';
+
+    // Su iOS (dalla versione 26) il foglio di condivisione richiede sempre
+    // un punto di ancoraggio (sharePositionOrigin), anche su iPhone.
+    // Senza questo parametro il pulsante non apre nulla.
+    final box = context.findRenderObject() as RenderBox?;
+    final origin = box != null ? (box.localToGlobal(Offset.zero) & box.size) : null;
+
+    SharePlus.instance.share(
+      ShareParams(text: testo, sharePositionOrigin: origin),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -114,7 +136,7 @@ class NowPlayingScreen extends StatelessWidget {
                               return IconButton(
                                 icon: const Icon(Icons.share, color: Colors.white, size: 28),
                                 tooltip: 'Condividi',
-                                                onPressed: () => _condividi(context, snapshot.data),
+                                onPressed: () => _condividi(context, snapshot.data),
                               );
                             },
                           ),
