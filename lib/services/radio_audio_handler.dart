@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 import 'package:just_audio/just_audio.dart';
 import '../radio_config.dart';
 import 'diag_log.dart';
+import 'disc_artwork.dart';
 import 'metadata_service.dart';
 
 /// Cuore dell'app: un solo AudioHandler che alimenta contemporaneamente
@@ -79,6 +80,8 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   bool _loadInFlight = false;
   bool _sessionStarted = false;
   static final bool _isIos = Platform.isIOS;
+  static const MethodChannel _carPlayChannel =
+      MethodChannel('it.photopix.saurosoft/carplay');
   DateTime? _carPlayLostAt;
   int _loadGen = 0;
   int _consecutiveErrors = 0;
@@ -159,8 +162,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     // La scena CarPlay (nativa, ios/Runner/CarPlaySceneDelegate.swift) chiede
     // l'avvio dell'ascolto da qui: il motore Dart e' unico e condiviso con
     // la schermata del telefono.
-    const MethodChannel('it.photopix.saurosoft/carplay')
-        .setMethodCallHandler((call) async {
+    _carPlayChannel.setMethodCallHandler((call) async {
       DiagLog.log('carplay -> ${call.method}');
       switch (call.method) {
         case 'play':
@@ -516,7 +518,22 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       title: nowPlaying.title,
       artist: nowPlaying.subtitle(),
       artUri: Uri.parse(nowPlaying.cover),
+      // La schermata del telefono mostra sempre la copertina originale,
+      // anche quando artUri diventa il disco per CarPlay/lock screen.
+      extras: {'cover': nowPlaying.cover},
     );
+    _pushMediaItem();
+    if (_isIos && nowPlaying.cover != RadioConfig.fallbackLogoUrl) {
+      unawaited(_applyDiscArtwork(nowPlaying.cover));
+    }
+  }
+
+  /// Sostituisce la copertina di CarPlay/lock screen con quella a forma di
+  /// disco in vinile, se riesce a comporla e il brano e' ancora lo stesso.
+  Future<void> _applyDiscArtwork(String cover) async {
+    final disc = await DiscArtwork.compose(cover);
+    if (disc == null || _baseItem.extras?['cover'] != cover) return;
+    _baseItem = _baseItem.copyWith(artUri: disc);
     _pushMediaItem();
   }
 
@@ -529,6 +546,15 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   String _barsText(int bars) => '▮' * bars + '▯' * (5 - bars);
+
+  /// Tacche del buffer per il tasto della schermata "In riproduzione" di
+  /// CarPlay (nativo): -1 quando non si sta ascoltando.
+  void _sendBarsToCarPlay(int bars) {
+    if (!_isIos) return;
+    unawaited(_carPlayChannel
+        .invokeMethod<void>('buffer', bars)
+        .catchError((Object _) {}));
+  }
 
   double _bufferAheadSeconds() {
     var played = _playedSeconds;
@@ -559,6 +585,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       _bufferBars = bars;
       _lastBarsPush = now;
       _pushMediaItem();
+      _sendBarsToCarPlay(bars);
     }
   }
 
@@ -567,6 +594,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     if (_bufferBars != -1) {
       _bufferBars = -1;
       _pushMediaItem();
+      _sendBarsToCarPlay(-1);
     }
   }
 

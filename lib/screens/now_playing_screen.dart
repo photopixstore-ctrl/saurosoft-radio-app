@@ -173,7 +173,11 @@ class NowPlayingScreen extends StatelessWidget {
                           child: StreamBuilder<MediaItem?>(
                             stream: audioHandler.mediaItem,
                             builder: (context, snapshot) {
-                              final artUri = snapshot.data?.artUri?.toString() ??
+                              // Su iOS artUri puo' essere il disco per CarPlay (file
+                              // locale): il telefono usa la copertina originale.
+                              final item = snapshot.data;
+                              final artUri = (item?.extras?['cover'] as String?) ??
+                                  item?.artUri?.toString() ??
                                   RadioConfig.fallbackLogoUrl;
                               return CachedNetworkImage(
                                 imageUrl: artUri,
