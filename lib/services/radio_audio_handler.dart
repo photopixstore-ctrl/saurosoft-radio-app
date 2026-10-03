@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 import 'package:audio_service/audio_service.dart';
 import 'package:audio_session/audio_session.dart';
 import 'package:flutter/services.dart';
@@ -76,6 +77,8 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   bool _waitingForCarPlay = false;
   bool _interrupted = false;
   bool _loadInFlight = false;
+  bool _sessionStarted = false;
+  static final bool _isIos = Platform.isIOS;
   DateTime? _carPlayLostAt;
   int _loadGen = 0;
   int _consecutiveErrors = 0;
@@ -268,7 +271,15 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     final showPlaying = _player.playing || wantsPlay;
     final AudioProcessingState processing;
     if (!wantsPlay) {
-      processing = _mapProcessingState(_player.processingState);
+      // Su iOS audio_service, appena lo stato pubblicato diventa "idle",
+      // chiama stopService: toglie il comando Play dal centro comandi e
+      // cancella il Now Playing. Dopo uno stop dall'auto/lock screen il tasto
+      // Play non aveva piu' nessun destinatario e non faceva nulla. Dopo il
+      // primo avvio quindi si resta su "ready" (in pausa, comandi attivi).
+      final mapped = _mapProcessingState(_player.processingState);
+      processing = (_isIos && _sessionStarted && mapped == AudioProcessingState.idle)
+          ? AudioProcessingState.ready
+          : mapped;
     } else if (_player.playing && _player.processingState == ProcessingState.ready) {
       processing = AudioProcessingState.ready;
     } else if (_player.processingState == ProcessingState.buffering) {
@@ -577,6 +588,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       'play() richiesto (playing=${_player.playing}, proc=${_player.processingState.name})',
     );
     _wasPlayingBeforeError = true;
+    _sessionStarted = true;
     _startLiveness();
     _publishState();
     if (_player.playing && _player.processingState == ProcessingState.ready) {
@@ -622,6 +634,10 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     await _player.stop();
     _publishState();
     _clearBuffer();
+    // Su iOS niente super.stop(): porterebbe lo stato a idle e audio_service
+    // smonterebbe i comandi, rendendo inutile il Play successivo (vedi
+    // _publishState). Il polling dei metadati resta attivo.
+    if (_isIos) return;
     _pollTimer?.cancel();
     return super.stop();
   }
