@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
@@ -13,11 +14,19 @@ class VinylPlayer extends StatefulWidget {
   final bool playing;
   final double size;
 
+  /// Inizio del brano (ora del telefono, ms) e durata in secondi: il braccio
+  /// parte dal bordo esterno a inizio brano e arriva verso il centro alla
+  /// fine. Se mancano, resta a meta' corsa.
+  final int? songStartMs;
+  final int? songDurationSec;
+
   const VinylPlayer({
     super.key,
     required this.coverUrl,
     required this.playing,
     this.size = 250,
+    this.songStartMs,
+    this.songDurationSec,
   });
 
   @override
@@ -32,16 +41,45 @@ class _VinylPlayerState extends State<VinylPlayer> with TickerProviderStateMixin
   late final AnimationController _arm =
       AnimationController(vsync: this, duration: const Duration(milliseconds: 700));
 
+  // Angolo di appoggio del braccio (gradi): 6 = solchi esterni, 16 = solchi
+  // piu' interni, appena fuori dalla copertina.
+  static const double _startDeg = 6;
+  static const double _endDeg = 16;
+  late final ValueNotifier<double> _playDeg = ValueNotifier(_computeDeg());
+  Timer? _progressTimer;
+
+  double _computeDeg() {
+    final start = widget.songStartMs;
+    final dur = widget.songDurationSec;
+    var progress = 0.5;
+    if (start != null && dur != null && dur > 0) {
+      final elapsed = (DateTime.now().millisecondsSinceEpoch - start) / 1000.0;
+      progress = (elapsed / dur).clamp(0.0, 1.0);
+    }
+    return _startDeg + (_endDeg - _startDeg) * progress;
+  }
+
   @override
   void initState() {
     super.initState();
+    _progressTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      _playDeg.value = _computeDeg();
+    });
     _apply();
   }
 
   @override
   void didUpdateWidget(VinylPlayer oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.playing != widget.playing) _apply();
+    _playDeg.value = _computeDeg();
+    if (oldWidget.playing != widget.playing) {
+      _apply();
+    } else if (widget.playing && oldWidget.songStartMs != widget.songStartMs) {
+      // Nuovo brano: la puntina si solleva e si riappoggia all'inizio.
+      _arm.reverse().whenComplete(() {
+        if (mounted && widget.playing) _arm.forward();
+      });
+    }
   }
 
   void _apply() {
@@ -58,6 +96,8 @@ class _VinylPlayerState extends State<VinylPlayer> with TickerProviderStateMixin
 
   @override
   void dispose() {
+    _progressTimer?.cancel();
+    _playDeg.dispose();
     _spin.dispose();
     _arm.dispose();
     super.dispose();
@@ -84,11 +124,11 @@ class _VinylPlayerState extends State<VinylPlayer> with TickerProviderStateMixin
                     ClipOval(
                       child: CachedNetworkImage(
                         imageUrl: widget.coverUrl,
-                        width: s * 0.6,
-                        height: s * 0.6,
+                        width: s * 0.72,
+                        height: s * 0.72,
                         fit: BoxFit.cover,
                         errorWidget: (_, __, ___) =>
-                            Container(width: s * 0.6, height: s * 0.6, color: Colors.white24),
+                            Container(width: s * 0.72, height: s * 0.72, color: Colors.white24),
                       ),
                     ),
                     Container(
@@ -107,9 +147,9 @@ class _VinylPlayerState extends State<VinylPlayer> with TickerProviderStateMixin
           ),
           Positioned.fill(
             child: AnimatedBuilder(
-              animation: _arm,
+              animation: Listenable.merge([_arm, _playDeg]),
               builder: (_, __) => CustomPaint(
-                painter: _ArmPainter(Curves.easeInOut.transform(_arm.value)),
+                painter: _ArmPainter(Curves.easeInOut.transform(_arm.value), _playDeg.value),
               ),
             ),
           ),
@@ -139,7 +179,7 @@ class _DiscPainter extends CustomPainter {
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1;
     var alt = false;
-    for (double g = r * 0.62; g < r * 0.97; g += 4) {
+    for (double g = r * 0.74; g < r * 0.97; g += 4) {
       groove.color = Colors.white.withOpacity(alt ? 0.10 : 0.04);
       canvas.drawCircle(c, g, groove);
       alt = !alt;
@@ -178,13 +218,14 @@ class _DiscPainter extends CustomPainter {
 /// (appoggiato sui solchi).
 class _ArmPainter extends CustomPainter {
   final double t;
-  const _ArmPainter(this.t);
+  final double playDeg;
+  const _ArmPainter(this.t, this.playDeg);
 
   @override
   void paint(Canvas canvas, Size size) {
     final s = size.width;
     final pivot = Offset(s * 0.9, s * 0.1);
-    final angle = (24 * t) * math.pi / 180;
+    final angle = (playDeg * t) * math.pi / 180;
     final dir = Offset(-math.sin(angle), math.cos(angle));
     final head = pivot + dir * (s * 0.75);
     final tail = pivot - dir * (s * 0.1);
@@ -235,7 +276,8 @@ class _ArmPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant _ArmPainter oldDelegate) => oldDelegate.t != t;
+  bool shouldRepaint(covariant _ArmPainter oldDelegate) =>
+      oldDelegate.t != t || oldDelegate.playDeg != playDeg;
 }
 
 /// Equalizzatore SIMULATO: non e' collegato all'audio (un equalizzatore vero

@@ -520,7 +520,11 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       artUri: Uri.parse(nowPlaying.cover),
       // La schermata del telefono mostra sempre la copertina originale,
       // anche quando artUri diventa il disco per CarPlay/lock screen.
-      extras: {'cover': nowPlaying.cover},
+      extras: {
+        'cover': nowPlaying.cover,
+        if (nowPlaying.songStartMs != null) 'songStartMs': nowPlaying.songStartMs,
+        if (nowPlaying.durationSec != null) 'songDurationSec': nowPlaying.durationSec,
+      },
     );
     _pushMediaItem();
     if (_isIos && nowPlaying.cover != RadioConfig.fallbackLogoUrl) {

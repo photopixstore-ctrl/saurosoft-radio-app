@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io' show HttpDate;
 import 'package:http/http.dart' as http;
 import '../radio_config.dart';
 import '../models/now_playing.dart';
@@ -16,7 +17,14 @@ class MetadataService {
       final response = await http.get(uri).timeout(const Duration(seconds: 4));
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body) as Map<String, dynamic>;
-        return NowPlaying.fromJson(data);
+        int? serverNowSec;
+        final date = response.headers['date'];
+        if (date != null) {
+          try {
+            serverNowSec = HttpDate.parse(date).millisecondsSinceEpoch ~/ 1000;
+          } catch (_) {}
+        }
+        return NowPlaying.fromJson(data, serverNowSec: serverNowSec);
       }
     } catch (_) {
       // In caso di errore di rete/timeout si mantiene lo stato precedente

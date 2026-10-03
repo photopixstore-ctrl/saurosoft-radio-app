@@ -342,7 +342,12 @@ class _VinylArea extends StatelessWidget {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  VinylPlayer(coverUrl: cover, playing: playing),
+                  VinylPlayer(
+                    coverUrl: cover,
+                    playing: playing,
+                    songStartMs: item?.extras?['songStartMs'] as int?,
+                    songDurationSec: item?.extras?['songDurationSec'] as int?,
+                  ),
                   const SizedBox(height: 10),
                   SimulatedEqualizer(playing: playing),
                 ],
