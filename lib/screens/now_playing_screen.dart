@@ -6,6 +6,7 @@ import '../radio_config.dart';
 import '../services/diag_log.dart';
 import '../widgets/cast_airplay_button.dart';
 import 'playlist_screen.dart';
+import 'request_song_screen.dart';
 import 'timer_sveglia_dialog.dart';
 
 class NowPlayingScreen extends StatelessWidget {
@@ -69,6 +70,12 @@ class NowPlayingScreen extends StatelessWidget {
     );
   }
 
+  void _openRequestSong(BuildContext context) {
+    Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => const RequestSongScreen()),
+    );
+  }
+
   void _condividi(BuildContext context, MediaItem? item) {
     final title = item?.title ?? RadioConfig.stationName;
     final artist = item?.artist ?? '';
@@ -119,6 +126,11 @@ class NowPlayingScreen extends StatelessWidget {
                             icon: const Icon(Icons.queue_music, color: Colors.white, size: 32),
                             tooltip: 'Playlist',
                             onPressed: () => _openPlaylist(context),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.playlist_add, color: Colors.white, size: 32),
+                            tooltip: 'Richiedi una canzone',
+                            onPressed: () => _openRequestSong(context),
                           ),
                           IconButton(
                             icon: const Icon(Icons.access_alarm, color: Colors.white, size: 30),
