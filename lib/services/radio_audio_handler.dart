@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:audio_service/audio_service.dart';
 import 'package:audio_session/audio_session.dart';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:just_audio/just_audio.dart';
 import '../radio_config.dart';
@@ -128,6 +129,23 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     });
 
     await _watchAudioSession();
+
+    // La scena CarPlay (nativa, ios/Runner/CarPlaySceneDelegate.swift) chiede
+    // l'avvio dell'ascolto da qui: il motore Dart e' unico e condiviso con
+    // la schermata del telefono.
+    const MethodChannel('it.photopix.saurosoft/carplay')
+        .setMethodCallHandler((call) async {
+      DiagLog.log('carplay -> ${call.method}');
+      switch (call.method) {
+        case 'play':
+          await play();
+          break;
+        case 'pause':
+          await pause();
+          break;
+      }
+      return null;
+    });
 
     mediaItem.add(MediaItem(
       id: RadioConfig.streamUrl,
