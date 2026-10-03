@@ -1,3 +1,4 @@
+import 'dart:io' show Platform;
 import 'package:audio_service/audio_service.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
@@ -5,6 +6,7 @@ import 'package:share_plus/share_plus.dart';
 import '../radio_config.dart';
 import '../services/diag_log.dart';
 import '../widgets/cast_airplay_button.dart';
+import '../widgets/vinyl_player.dart';
 import 'playlist_screen.dart';
 import 'request_song_screen.dart';
 import 'timer_sveglia_dialog.dart';
@@ -168,6 +170,9 @@ class NowPlayingScreen extends StatelessWidget {
                     child: Column(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
+                        if (_useVinyl)
+                          _VinylArea(audioHandler: audioHandler)
+                        else
                         ClipRRect(
                           borderRadius: BorderRadius.circular(16),
                           child: StreamBuilder<MediaItem?>(
@@ -258,6 +263,49 @@ class NowPlayingScreen extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+// Disco in vinile solo su iPhone (l'app Android e' seguita a parte): per
+// abilitarlo anche li basta mettere `true`.
+final bool _useVinyl = Platform.isIOS;
+
+/// Copertina rotante in un disco con braccio e puntina, piu' l'equalizzatore
+/// simulato. Usa la copertina originale (extras['cover']), non il disco
+/// composto per CarPlay.
+class _VinylArea extends StatelessWidget {
+  final AudioHandler audioHandler;
+
+  const _VinylArea({required this.audioHandler});
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<MediaItem?>(
+      stream: audioHandler.mediaItem,
+      builder: (context, itemSnapshot) {
+        final item = itemSnapshot.data;
+        final cover = (item?.extras?['cover'] as String?) ??
+            item?.artUri?.toString() ??
+            RadioConfig.fallbackLogoUrl;
+        return StreamBuilder<PlaybackState>(
+          stream: audioHandler.playbackState,
+          builder: (context, stateSnapshot) {
+            final playing = stateSnapshot.data?.playing ?? false;
+            return FittedBox(
+              fit: BoxFit.scaleDown,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  VinylPlayer(coverUrl: cover, playing: playing),
+                  const SizedBox(height: 10),
+                  SimulatedEqualizer(playing: playing),
+                ],
+              ),
+            );
+          },
+        );
+      },
     );
   }
 }
