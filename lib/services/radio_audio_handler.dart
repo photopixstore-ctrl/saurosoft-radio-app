@@ -33,7 +33,17 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   // ma nessun audio").
   static const _forwardBuffer = Duration(seconds: 15);
 
+  // useProxyForRequestHeaders: false e' FONDAMENTALE. Con gli header
+  // personalizzati (User-Agent) just_audio, di default, fa passare l'audio da
+  // un piccolo server HTTP locale (127.0.0.1) dentro l'app e AVPlayer si
+  // collega a quello. iOS chiude quel server quando l'app viene sospesa, ma
+  // just_audio lo considera ancora attivo: da quel momento OGNI caricamento
+  // (live e backup) fallisce subito (~30 ms) con "-1004 Could not connect to
+  // the server" (visto nel log reale del 3/10, e spiega "play acceso ma
+  // nessun audio" dopo una pausa lunga o uno stacco). Con false gli header
+  // vanno direttamente ad AVPlayer, senza proxy.
   final AudioPlayer _player = AudioPlayer(
+    useProxyForRequestHeaders: false,
     audioLoadConfiguration: AudioLoadConfiguration(
       darwinLoadControl: DarwinLoadControl(
         automaticallyWaitsToMinimizeStalling: true,
@@ -86,27 +96,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     DiagLog.log('--- avvio handler ---');
 
     _player.playbackEventStream.listen(
-      (event) {
-        // Mentre stiamo caricando per un play voluto dall'utente mostriamo
-        // gia' "pausa/caricamento" invece di un play che sembra ignorato.
-        final showPlaying =
-            _player.playing || (_wasPlayingBeforeError && _loadInFlight);
-        playbackState.add(playbackState.value.copyWith(
-          controls: [
-            if (showPlaying) MediaControl.pause else MediaControl.play,
-            MediaControl.stop,
-          ],
-          systemActions: const {MediaAction.play, MediaAction.pause},
-          androidCompactActionIndices: const [0],
-          processingState: (_wasPlayingBeforeError && _loadInFlight)
-              ? AudioProcessingState.loading
-              : _mapProcessingState(_player.processingState),
-          playing: showPlaying,
-          updatePosition: _player.position,
-          bufferedPosition: _player.bufferedPosition,
-          speed: _player.speed,
-        ));
-      },
+      (event) => _publishState(),
       onError: (Object e, StackTrace st) {
         DiagLog.log('playbackEvent error: ${e.runtimeType} $e');
         _handleStreamError('playbackEvent error');
@@ -115,6 +105,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
 
     _playerStateSub = _player.playerStateStream.listen((state) {
       _stateSince = DateTime.now();
+      _publishState();
       DiagLog.log(
         'state playing=${state.playing} proc=${state.processingState.name} '
         'pos=${_player.position.inSeconds}s backup=$_usingBackup',
@@ -223,6 +214,39 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     });
   }
 
+  /// Stato mostrato a lock screen/UI/CarPlay, calcolato dall'INTENTO
+  /// dell'utente e dallo stato reale del player. Va richiamato a ogni
+  /// cambiamento, anche quando il player non emette eventi (es. stop() su
+  /// un player gia' fermo dopo un errore): senza, il pulsante restava su
+  /// "pausa" con nessun audio.
+  void _publishState() {
+    final wantsPlay = _wasPlayingBeforeError && !_waitingForCarPlay;
+    final showPlaying = _player.playing || wantsPlay;
+    final AudioProcessingState processing;
+    if (!wantsPlay) {
+      processing = _mapProcessingState(_player.processingState);
+    } else if (_player.playing && _player.processingState == ProcessingState.ready) {
+      processing = AudioProcessingState.ready;
+    } else if (_player.processingState == ProcessingState.buffering) {
+      processing = AudioProcessingState.buffering;
+    } else {
+      processing = AudioProcessingState.loading;
+    }
+    playbackState.add(playbackState.value.copyWith(
+      controls: [
+        if (showPlaying) MediaControl.pause else MediaControl.play,
+        MediaControl.stop,
+      ],
+      systemActions: const {MediaAction.play, MediaAction.pause},
+      androidCompactActionIndices: const [0],
+      processingState: processing,
+      playing: showPlaying,
+      updatePosition: _player.position,
+      bufferedPosition: _player.bufferedPosition,
+      speed: _player.speed,
+    ));
+  }
+
   AudioProcessingState _mapProcessingState(ProcessingState state) {
     switch (state) {
       case ProcessingState.idle:
@@ -254,6 +278,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   Future<void> _loadAndPlay(String url) async {
     final gen = ++_loadGen;
     _loadInFlight = true;
+    _publishState();
     DiagLog.log('load start -> $url');
     try {
       await _setSource(url).timeout(const Duration(seconds: 15));
@@ -271,6 +296,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       }
     } finally {
       if (gen == _loadGen) _loadInFlight = false;
+      _publishState();
     }
   }
 
@@ -454,6 +480,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     );
     _wasPlayingBeforeError = true;
     _startLiveness();
+    _publishState();
     if (_player.playing && _player.processingState == ProcessingState.ready) {
       return;
     }
@@ -476,6 +503,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     // Stesso comportamento di LiveOnlyPlayer.pause(): stop vero, non una
     // pausa che tiene il buffer, cosi' alla ripresa si riparte dal vivo.
     await _player.stop();
+    _publishState();
   }
 
   @override
@@ -485,6 +513,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     _cancelRecoveryState();
     _stopLiveness();
     await _player.stop();
+    _publishState();
     _pollTimer?.cancel();
     return super.stop();
   }
