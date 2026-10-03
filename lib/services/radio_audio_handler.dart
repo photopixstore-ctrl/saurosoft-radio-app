@@ -76,6 +76,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   bool _waitingForCarPlay = false;
   bool _interrupted = false;
   bool _loadInFlight = false;
+  DateTime? _carPlayLostAt;
   int _loadGen = 0;
   int _consecutiveErrors = 0;
   int _tickCount = 0;
@@ -115,6 +116,12 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       (event) => _publishState(),
       onError: (Object e, StackTrace st) {
         DiagLog.log('playbackEvent error: ${e.runtimeType} $e');
+        // Errori ("Connection aborted") emessi mentre un caricamento e' in
+        // corso arrivano dai caricamenti precedenti sostituiti: non sono
+        // problemi dello stream (log reale 3/10: facevano scattare il backup
+        // senza motivo). L'esito del caricamento in corso lo gestisce
+        // _loadAndPlay.
+        if (_loadInFlight) return;
         _handleStreamError('playbackEvent error');
       },
     );
@@ -198,6 +205,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       DiagLog.log('becomingNoisy (rotta audio persa) wantPlaying=$_wasPlayingBeforeError');
       if (!_wasPlayingBeforeError) return;
       _waitingForCarPlay = true;
+      _carPlayLostAt = DateTime.now();
       _loadGen++;
       _loadInFlight = false;
       _retryTimer?.cancel();
@@ -225,6 +233,22 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
         _waitingForCarPlay = false;
         _carPlayWaitTimeout?.cancel();
         _carPlayWaitTimeout = null;
+        // Il timer dei 2 minuti non e' affidabile se l'app e' stata sospesa:
+        // si confronta l'orario di perdita.
+        final lostAt = _carPlayLostAt;
+        final withinWindow = lostAt != null &&
+            DateTime.now().difference(lostAt) <= const Duration(minutes: 2);
+        if (!withinWindow) {
+          DiagLog.log('CarPlay tornato dopo piu\' di 2 minuti: resto in pausa');
+          _wasPlayingBeforeError = false;
+          _stopLiveness();
+          _publishState();
+          return;
+        }
+        // L'interruzione "unknown" emessa da iOS alla perdita della rotta non
+        // ha un evento di fine: va azzerata qui, altrimenti il controllo
+        // periodico resterebbe disattivato.
+        _interrupted = false;
         DiagLog.log('CarPlay tornato: riprendo con connessione fresca');
         _startLiveness();
         await _loadAndPlay(
@@ -556,6 +580,14 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     _startLiveness();
     _publishState();
     if (_player.playing && _player.processingState == ProcessingState.ready) {
+      return;
+    }
+    // CarPlay e lock screen mandano piu' comandi play quasi insieme (visti 5
+    // in 17 ms nel log reale del 3/10): se un caricamento e' gia' in corso
+    // non se ne avvia un altro, altrimenti si sovrappongono, si abortiscono a
+    // vicenda e fanno scattare il backup.
+    if (_loadInFlight) {
+      DiagLog.log('play() ignorato: caricamento gia\' in corso');
       return;
     }
     // Un play manuale riparte sempre dal LIVE con una connessione fresca,
