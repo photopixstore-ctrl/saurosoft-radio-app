@@ -99,6 +99,95 @@ class NowPlayingScreen extends StatelessWidget {
     );
   }
 
+  Widget _buildCover() {
+    if (_useVinyl) return _VinylArea(audioHandler: audioHandler);
+    return FittedBox(
+      fit: BoxFit.scaleDown,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(16),
+        child: StreamBuilder<MediaItem?>(
+          stream: audioHandler.mediaItem,
+          builder: (context, snapshot) {
+            // Su iOS artUri puo' essere il disco per CarPlay (file
+            // locale): il telefono usa la copertina originale.
+            final item = snapshot.data;
+            final artUri = (item?.extras?['cover'] as String?) ??
+                item?.artUri?.toString() ??
+                RadioConfig.fallbackLogoUrl;
+            return CachedNetworkImage(
+              imageUrl: artUri,
+              width: 260,
+              height: 260,
+              fit: BoxFit.cover,
+              errorWidget: (_, __, ___) =>
+                  Container(width: 260, height: 260, color: Colors.white24),
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  Widget _buildInfo() {
+    return StreamBuilder<MediaItem?>(
+      stream: audioHandler.mediaItem,
+      builder: (context, snapshot) {
+        final item = snapshot.data;
+        return Column(
+          children: [
+            Text(
+              item?.title ?? RadioConfig.stationName,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 22,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              item?.artist ?? RadioConfig.tagline,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.white70, fontSize: 16),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _buildControls() {
+    return StreamBuilder<PlaybackState>(
+      stream: audioHandler.playbackState,
+      builder: (context, snapshot) {
+        final playing = snapshot.data?.playing ?? false;
+        return Column(
+          children: [
+            Container(
+              width: 72,
+              height: 72,
+              decoration: const BoxDecoration(
+                color: Colors.white,
+                shape: BoxShape.circle,
+              ),
+              child: IconButton(
+                iconSize: 36,
+                color: const Color(0xFF12151C),
+                icon: Icon(playing ? Icons.pause : Icons.play_arrow),
+                onPressed: () => playing ? audioHandler.pause() : audioHandler.play(),
+              ),
+            ),
+            const SizedBox(height: 18),
+            SizedBox(
+              height: 18,
+              child: playing ? _BufferBars(audioHandler: audioHandler) : null,
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -165,97 +254,53 @@ class NowPlayingScreen extends StatelessWidget {
                   ),
                 ),
                 Expanded(
-                  child: Padding(
-                    padding: const EdgeInsets.all(24.0),
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        if (_useVinyl)
-                          _VinylArea(audioHandler: audioHandler)
-                        else
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(16),
-                          child: StreamBuilder<MediaItem?>(
-                            stream: audioHandler.mediaItem,
-                            builder: (context, snapshot) {
-                              // Su iOS artUri puo' essere il disco per CarPlay (file
-                              // locale): il telefono usa la copertina originale.
-                              final item = snapshot.data;
-                              final artUri = (item?.extras?['cover'] as String?) ??
-                                  item?.artUri?.toString() ??
-                                  RadioConfig.fallbackLogoUrl;
-                              return CachedNetworkImage(
-                                imageUrl: artUri,
-                                width: 260,
-                                height: 260,
-                                fit: BoxFit.cover,
-                                errorWidget: (_, __, ___) => Container(
-                                  width: 260,
-                                  height: 260,
-                                  color: Colors.white24,
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      final landscape = constraints.maxWidth > constraints.maxHeight;
+                      if (landscape) {
+                        // In orizzontale: copertina/disco a sinistra, titolo e
+                        // comandi a destra (scorrevoli, mai tagliati).
+                        return Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
+                          child: Row(
+                            children: [
+                              Expanded(child: Center(child: _buildCover())),
+                              Expanded(
+                                child: Center(
+                                  child: SingleChildScrollView(
+                                    child: Column(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        _buildInfo(),
+                                        const SizedBox(height: 20),
+                                        _buildControls(),
+                                      ],
+                                    ),
+                                  ),
                                 ),
-                              );
-                            },
+                              ),
+                            ],
+                          ),
+                        );
+                      }
+                      // In verticale, scorrevole se lo schermo e' piccolo.
+                      return SingleChildScrollView(
+                        padding: const EdgeInsets.all(24.0),
+                        child: ConstrainedBox(
+                          constraints: BoxConstraints(minHeight: constraints.maxHeight - 48),
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              _buildCover(),
+                              const SizedBox(height: 28),
+                              _buildInfo(),
+                              const SizedBox(height: 36),
+                              _buildControls(),
+                            ],
                           ),
                         ),
-                        const SizedBox(height: 28),
-                        StreamBuilder<MediaItem?>(
-                          stream: audioHandler.mediaItem,
-                          builder: (context, snapshot) {
-                            final item = snapshot.data;
-                            return Column(
-                              children: [
-                                Text(
-                                  item?.title ?? RadioConfig.stationName,
-                                  textAlign: TextAlign.center,
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 22,
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                                const SizedBox(height: 6),
-                                Text(
-                                  item?.artist ?? RadioConfig.tagline,
-                                  textAlign: TextAlign.center,
-                                  style: const TextStyle(color: Colors.white70, fontSize: 16),
-                                ),
-                              ],
-                            );
-                          },
-                        ),
-                        const SizedBox(height: 36),
-                        StreamBuilder<PlaybackState>(
-                          stream: audioHandler.playbackState,
-                          builder: (context, snapshot) {
-                            final playing = snapshot.data?.playing ?? false;
-                            return Column(
-                              children: [
-                                Container(
-                                  width: 72,
-                                  height: 72,
-                                  decoration: const BoxDecoration(
-                                    color: Colors.white,
-                                    shape: BoxShape.circle,
-                                  ),
-                                  child: IconButton(
-                                    iconSize: 36,
-                                    color: const Color(0xFF12151C),
-                                    icon: Icon(playing ? Icons.pause : Icons.play_arrow),
-                                    onPressed: () => playing ? audioHandler.pause() : audioHandler.play(),
-                                  ),
-                                ),
-                                const SizedBox(height: 18),
-                                SizedBox(
-                                  height: 18,
-                                  child: playing ? _BufferBars(audioHandler: audioHandler) : null,
-                                ),
-                              ],
-                            );
-                          },
-                        ),
-                      ],
-                    ),
+                      );
+                    },
                   ),
                 ),
               ],
