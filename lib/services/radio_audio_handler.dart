@@ -83,6 +83,22 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   String _lastArtist = '';
   String _lastTitle = '';
 
+  // Buffer = secondi di audio gia' scaricato ma non ancora suonato. Su iOS la
+  // posizione di riproduzione di questo stream resta sempre 0, ma
+  // bufferedPosition cresce in tempo reale (log reale del 3/10: +10s ogni
+  // 10s, ~13s in piu' del tempo ascoltato). Il buffer si ricava quindi
+  // sottraendo il tempo di ascolto effettivo (ready+playing) misurato qui.
+  double _playedSeconds = 0;
+  DateTime? _activeSince;
+  int _bufferBars = -1;
+  DateTime _lastBarsPush = DateTime.fromMillisecondsSinceEpoch(0);
+  MediaItem _baseItem = MediaItem(
+    id: RadioConfig.streamUrl,
+    title: RadioConfig.stationName,
+    artist: RadioConfig.tagline,
+    artUri: Uri.parse(RadioConfig.fallbackLogoUrl),
+  );
+
   /// Nomi delle custom action esposte a lock screen/UI, stessa idea dei
   /// SessionCommand custom di PlaybackService.kt.
   static const String actionSetSleepTimer = 'setSleepTimer';
@@ -104,7 +120,16 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     );
 
     _playerStateSub = _player.playerStateStream.listen((state) {
-      _stateSince = DateTime.now();
+      final now = DateTime.now();
+      _stateSince = now;
+      final activeSince = _activeSince;
+      if (activeSince != null) {
+        _playedSeconds += now.difference(activeSince).inMilliseconds / 1000.0;
+        _activeSince = null;
+      }
+      if (state.playing && state.processingState == ProcessingState.ready) {
+        _activeSince = now;
+      }
       _publishState();
       DiagLog.log(
         'state playing=${state.playing} proc=${state.processingState.name} '
@@ -138,12 +163,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       return null;
     });
 
-    mediaItem.add(MediaItem(
-      id: RadioConfig.streamUrl,
-      title: RadioConfig.stationName,
-      artist: RadioConfig.tagline,
-      artUri: Uri.parse(RadioConfig.fallbackLogoUrl),
-    ));
+    mediaItem.add(_baseItem);
 
     // Nessun precaricamento dello stream all'avvio: una connessione aperta
     // senza ascoltare resta ferma mesi... e al primo play si rischia di
@@ -278,6 +298,8 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   Future<void> _loadAndPlay(String url) async {
     final gen = ++_loadGen;
     _loadInFlight = true;
+    _playedSeconds = 0;
+    _activeSince = null;
     _publishState();
     DiagLog.log('load start -> $url');
     try {
@@ -391,10 +413,11 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   void _livenessTick() {
     if (!_wasPlayingBeforeError) return;
     _tickCount++;
+    _publishBuffer();
     if (_tickCount % 5 == 0) {
       DiagLog.log(
         'health playing=${_player.playing} proc=${_player.processingState.name} '
-        'pos=${_player.position.inSeconds}s buf=${_player.bufferedPosition.inSeconds}s '
+        'ahead=${_bufferAheadSeconds().toStringAsFixed(1)}s buf=${_player.bufferedPosition.inSeconds}s '
         'backup=$_usingBackup inflight=$_loadInFlight carplay=$_waitingForCarPlay '
         'interrotto=$_interrupted',
       );
@@ -453,12 +476,63 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     _lastArtist = nowPlaying.artist;
     _lastTitle = nowPlaying.title;
 
-    mediaItem.add(MediaItem(
+    _baseItem = MediaItem(
       id: RadioConfig.streamUrl,
       title: nowPlaying.title,
       artist: nowPlaying.subtitle(),
       artUri: Uri.parse(nowPlaying.cover),
-    ));
+    );
+    _pushMediaItem();
+  }
+
+  /// Pubblica il brano corrente; mentre si ascolta, la riga "album" (inutilizzata
+  /// per una radio) mostra il livello del buffer: e' l'unico posto di CarPlay
+  /// e della lock screen dove si puo' mostrare senza stonare.
+  void _pushMediaItem() {
+    final album = _bufferBars >= 0 ? 'Buffer ${_barsText(_bufferBars)}' : null;
+    mediaItem.add(_baseItem.copyWith(album: album));
+  }
+
+  String _barsText(int bars) => '▮' * bars + '▯' * (5 - bars);
+
+  double _bufferAheadSeconds() {
+    var played = _playedSeconds;
+    final since = _activeSince;
+    if (since != null) {
+      played += DateTime.now().difference(since).inMilliseconds / 1000.0;
+    }
+    final ahead = _player.bufferedPosition.inMilliseconds / 1000.0 - played;
+    if (ahead < 0) return 0;
+    return ahead > 60 ? 60 : ahead;
+  }
+
+  /// Invia il livello di buffer alla schermata (customEvent) e, quando cambia
+  /// il numero di tacche (max ogni 6 s), anche a CarPlay/lock screen.
+  void _publishBuffer() {
+    final active = _player.playing &&
+        (_player.processingState == ProcessingState.ready ||
+            _player.processingState == ProcessingState.buffering);
+    final ahead = active ? _bufferAheadSeconds() : 0.0;
+    customEvent.add({'bufferAhead': ahead});
+    var bars = -1;
+    if (active) {
+      bars = ahead <= 0.5 ? 0 : (ahead / 3).ceil().clamp(1, 5).toInt();
+    }
+    final now = DateTime.now();
+    if (bars != _bufferBars &&
+        (bars == -1 || now.difference(_lastBarsPush) > const Duration(seconds: 6))) {
+      _bufferBars = bars;
+      _lastBarsPush = now;
+      _pushMediaItem();
+    }
+  }
+
+  void _clearBuffer() {
+    customEvent.add({'bufferAhead': 0.0});
+    if (_bufferBars != -1) {
+      _bufferBars = -1;
+      _pushMediaItem();
+    }
   }
 
   void _cancelRecoveryState() {
@@ -504,6 +578,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     // pausa che tiene il buffer, cosi' alla ripresa si riparte dal vivo.
     await _player.stop();
     _publishState();
+    _clearBuffer();
   }
 
   @override
@@ -514,6 +589,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     _stopLiveness();
     await _player.stop();
     _publishState();
+    _clearBuffer();
     _pollTimer?.cancel();
     return super.stop();
   }

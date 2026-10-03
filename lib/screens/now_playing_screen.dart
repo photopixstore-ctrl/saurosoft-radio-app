@@ -220,19 +220,28 @@ class NowPlayingScreen extends StatelessWidget {
                           stream: audioHandler.playbackState,
                           builder: (context, snapshot) {
                             final playing = snapshot.data?.playing ?? false;
-                            return Container(
-                              width: 72,
-                              height: 72,
-                              decoration: const BoxDecoration(
-                                color: Colors.white,
-                                shape: BoxShape.circle,
-                              ),
-                              child: IconButton(
-                                iconSize: 36,
-                                color: const Color(0xFF12151C),
-                                icon: Icon(playing ? Icons.pause : Icons.play_arrow),
-                                onPressed: () => playing ? audioHandler.pause() : audioHandler.play(),
-                              ),
+                            return Column(
+                              children: [
+                                Container(
+                                  width: 72,
+                                  height: 72,
+                                  decoration: const BoxDecoration(
+                                    color: Colors.white,
+                                    shape: BoxShape.circle,
+                                  ),
+                                  child: IconButton(
+                                    iconSize: 36,
+                                    color: const Color(0xFF12151C),
+                                    icon: Icon(playing ? Icons.pause : Icons.play_arrow),
+                                    onPressed: () => playing ? audioHandler.pause() : audioHandler.play(),
+                                  ),
+                                ),
+                                const SizedBox(height: 18),
+                                SizedBox(
+                                  height: 18,
+                                  child: playing ? _BufferBars(audioHandler: audioHandler) : null,
+                                ),
+                              ],
                             );
                           },
                         ),
@@ -245,6 +254,46 @@ class NowPlayingScreen extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// Indicatore discreto del buffer (5 tacche): secondi di audio gia' scaricato
+/// ma non ancora suonato. Riceve il valore dal RadioAudioHandler (customEvent).
+class _BufferBars extends StatelessWidget {
+  final AudioHandler audioHandler;
+
+  const _BufferBars({required this.audioHandler});
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<dynamic>(
+      stream: audioHandler.customEvent,
+      builder: (context, snapshot) {
+        final data = snapshot.data;
+        final ahead =
+            (data is Map && data['bufferAhead'] is num) ? (data['bufferAhead'] as num).toDouble() : 0.0;
+        final bars = ahead <= 0.5 ? 0 : (ahead / 3).ceil().clamp(1, 5).toInt();
+        return Tooltip(
+          message: 'Buffer: ${ahead.toStringAsFixed(0)} s',
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              for (var i = 1; i <= 5; i++)
+                Container(
+                  width: 4,
+                  height: 6.0 + i * 2,
+                  margin: const EdgeInsets.symmetric(horizontal: 1.5),
+                  decoration: BoxDecoration(
+                    color: i <= bars ? Colors.white70 : Colors.white24,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+            ],
+          ),
+        );
+      },
     );
   }
 }
