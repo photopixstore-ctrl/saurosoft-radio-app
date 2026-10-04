@@ -547,15 +547,12 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     _pushMediaItem();
   }
 
-  /// Pubblica il brano corrente; mentre si ascolta, la riga "album" (inutilizzata
-  /// per una radio) mostra il livello del buffer: e' l'unico posto di CarPlay
-  /// e della lock screen dove si puo' mostrare senza stonare.
+  /// Pubblica il brano corrente. Il buffer NON e' piu' scritto nella riga
+  /// "album" (Domenico l'ha voluto togliere da sotto l'artista): in auto resta
+  /// solo il tasto con le tacche, sul telefono la barra sotto il tasto play.
   void _pushMediaItem() {
-    final album = _bufferBars >= 0 ? 'Buffer ${_barsText(_bufferBars)}' : null;
-    mediaItem.add(_baseItem.copyWith(album: album));
+    mediaItem.add(_baseItem);
   }
-
-  String _barsText(int bars) => '▮' * bars + '▯' * (5 - bars);
 
   /// Tacche del buffer per il tasto della schermata "In riproduzione" di
   /// CarPlay (nativo): -1 quando non si sta ascoltando.
@@ -594,7 +591,6 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
         (bars == -1 || now.difference(_lastBarsPush) > const Duration(seconds: 6))) {
       _bufferBars = bars;
       _lastBarsPush = now;
-      _pushMediaItem();
       _sendBarsToCarPlay(bars);
     }
   }
@@ -603,7 +599,6 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     customEvent.add({'bufferAhead': 0.0});
     if (_bufferBars != -1) {
       _bufferBars = -1;
-      _pushMediaItem();
       _sendBarsToCarPlay(-1);
     }
   }

@@ -49,18 +49,29 @@ final class CarPlayBridge {
   }
 }
 
-/// Icona a 5 tacche (stile "campo telefono") per il livello del buffer.
+/// Icona a 5 tacche (stile "campo telefono") per il livello del buffer, con la
+/// scritta "buffer" piccola sotto.
 enum BufferBarsImage {
   static func make(bars: Int) -> UIImage {
-    let size = CGSize(width: 40, height: 40)
+    let size = CGSize(width: 44, height: 44)
     let image = UIGraphicsImageRenderer(size: size).image { _ in
       for i in 0..<5 {
-        let height = CGFloat(10 + i * 5)
-        let rect = CGRect(x: CGFloat(4 + i * 7), y: 36 - height, width: 4, height: height)
+        let height = CGFloat(8 + i * 4)
+        let rect = CGRect(x: CGFloat(6 + i * 7), y: 28 - height, width: 4, height: height)
         // Immagine "template": il sistema la colora, conta solo l'alpha.
         UIColor.white.withAlphaComponent(i < bars ? 1.0 : 0.3).setFill()
         UIBezierPath(roundedRect: rect, cornerRadius: 2).fill()
       }
+      let label = "buffer" as NSString
+      let attributes: [NSAttributedString.Key: Any] = [
+        .font: UIFont.systemFont(ofSize: 10, weight: .medium),
+        .foregroundColor: UIColor.white,
+      ]
+      let textSize = label.size(withAttributes: attributes)
+      label.draw(
+        at: CGPoint(x: (size.width - textSize.width) / 2, y: 31),
+        withAttributes: attributes
+      )
     }
     return image.withRenderingMode(.alwaysTemplate)
   }

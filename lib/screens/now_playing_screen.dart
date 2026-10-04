@@ -392,6 +392,11 @@ class _BufferBars extends StatelessWidget {
                     borderRadius: BorderRadius.circular(2),
                   ),
                 ),
+              const SizedBox(width: 6),
+              const Text(
+                'buffer',
+                style: TextStyle(color: Colors.white54, fontSize: 10),
+              ),
             ],
           ),
         );
