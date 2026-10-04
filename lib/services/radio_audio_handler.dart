@@ -132,7 +132,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   Future<void> _init() async {
-    DiagLog.log('--- avvio handler (build rete v8) ---');
+    DiagLog.log('--- avvio handler (build rete v9) ---');
 
     _attachPlayerListeners();
 
@@ -520,7 +520,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     if (!_usingBackup &&
         _player.playing &&
         _player.processingState == ProcessingState.ready &&
-        _bufferAheadSeconds() >= 1.5) {
+        _bufferAheadSeconds() >= 0.5) {
       await _seamlessReload();
       return;
     }
@@ -581,7 +581,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
 
   void _startLiveness() {
     _livenessTimer ??=
-        Timer.periodic(const Duration(seconds: 2), (_) => _livenessTick());
+        Timer.periodic(const Duration(seconds: 1), (_) => _livenessTick());
   }
 
   void _stopLiveness() {
@@ -597,7 +597,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     if (!_wasPlayingBeforeError) return;
     _tickCount++;
     _publishBuffer();
-    if (_tickCount % 5 == 0) {
+    if (_tickCount % 10 == 0) {
       DiagLog.log(
         'health playing=${_player.playing} proc=${_player.processingState.name} '
         'ahead=${_bufferAheadSeconds().toStringAsFixed(1)}s buf=${_player.bufferedPosition.inSeconds}s '
