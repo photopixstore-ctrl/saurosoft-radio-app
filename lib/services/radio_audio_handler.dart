@@ -551,6 +551,26 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
         .catchError((Object _) {}));
   }
 
+  /// Storico recente dei secondi di buffer, per calmare la barra.
+  final List<MapEntry<DateTime, double>> _aheadHistory = [];
+
+  /// Su iOS bufferedPosition cresce a scatti (anche +14 s alla volta ogni ~20
+  /// s), quindi il valore grezzo oscilla tra ~3 e ~15 s senza che l'audio
+  /// abbia problemi. Per la barra si tiene il massimo degli ultimi 14 s e si
+  /// mostra il valore grezzo solo quando e' davvero quasi zero (<= 1,5 s):
+  /// cosi' la barra scende solo quando l'audio sta davvero finendo.
+  double _calmAhead(double raw) {
+    final now = DateTime.now();
+    _aheadHistory.add(MapEntry(now, raw));
+    _aheadHistory.removeWhere((e) => now.difference(e.key) > const Duration(seconds: 14));
+    if (raw <= 1.5) return raw;
+    var peak = raw;
+    for (final e in _aheadHistory) {
+      if (e.value > peak) peak = e.value;
+    }
+    return peak;
+  }
+
   double _bufferAheadSeconds() {
     var played = _playedSeconds;
     final since = _activeSince;
@@ -568,7 +588,8 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     final active = _player.playing &&
         (_player.processingState == ProcessingState.ready ||
             _player.processingState == ProcessingState.buffering);
-    final ahead = active ? _bufferAheadSeconds() : 0.0;
+    if (!active) _aheadHistory.clear();
+    final ahead = active ? _calmAhead(_bufferAheadSeconds()) : 0.0;
     customEvent.add({'bufferAhead': ahead});
     var bars = -1;
     if (active) {
@@ -576,7 +597,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     }
     final now = DateTime.now();
     if (bars != _bufferBars &&
-        (bars == -1 || now.difference(_lastBarsPush) > const Duration(seconds: 6))) {
+        (bars <= 0 || now.difference(_lastBarsPush) > const Duration(seconds: 6))) {
       _bufferBars = bars;
       _lastBarsPush = now;
       _sendBarsToCarPlay(bars);
@@ -584,6 +605,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   void _clearBuffer() {
+    _aheadHistory.clear();
     customEvent.add({'bufferAhead': 0.0});
     if (_bufferBars != -1) {
       _bufferBars = -1;
