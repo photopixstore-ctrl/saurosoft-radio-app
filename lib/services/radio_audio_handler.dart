@@ -541,7 +541,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
               Timer(const Duration(seconds: 2), () {
                 if (!_wasPlayingBeforeError || _loadInFlight || _usingBackup) return;
                 if (_player.bufferedPosition != snapshot) {
-                  DiagLog.log('flusso ripreso da solo dopo l'interruzione');
+                  DiagLog.log("flusso ripreso da solo dopo l'interruzione");
                   return;
                 }
                 _handleStreamError(
