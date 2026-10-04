@@ -103,6 +103,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     title: RadioConfig.stationName,
     artist: RadioConfig.tagline,
     artUri: Uri.parse(RadioConfig.fallbackLogoUrl),
+    isLive: true,
   );
 
   /// Nomi delle custom action esposte a lock screen/UI, stessa idea dei
@@ -523,6 +524,8 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       title: nowPlaying.title,
       artist: nowPlaying.subtitle(),
       artUri: Uri.parse(nowPlaying.cover),
+      // Diretta: iOS/CarPlay tolgono barra di avanzamento e salti avanti/indietro.
+      isLive: true,
       // Copertina originale: in auto e sulla lock screen resta quella standard
       // (niente effetto disco, scelta di Domenico); il disco e' solo nell'app.
       extras: {
