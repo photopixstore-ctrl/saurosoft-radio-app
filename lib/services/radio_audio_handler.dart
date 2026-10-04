@@ -124,7 +124,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   Future<void> _init() async {
-    DiagLog.log('--- avvio handler (build rete v4) ---');
+    DiagLog.log('--- avvio handler (build rete v5) ---');
 
     _player.playbackEventStream.listen(
       (event) => _publishState(),
@@ -555,7 +555,11 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
               // se dopo 1 s non e' cresciuto, ci si riconnette subito.
               _networkWasDown = false;
               final snapshot = _player.bufferedPosition;
-              Timer(const Duration(seconds: 1), () {
+              // Con poco buffer rimasto non c'e' tempo da perdere: si
+              // riconnette subito (log reale: tagli da ~12 s arrivano qui con
+              // ~2 s di audio, e il caricamento ne richiede 1 circa).
+              final grace = aheadNow <= 5.0 ? Duration.zero : const Duration(seconds: 1);
+              Timer(grace, () {
                 if (!_wasPlayingBeforeError || _loadInFlight || _usingBackup) return;
                 if (_player.bufferedPosition != snapshot) {
                   DiagLog.log("flusso ripreso da solo dopo l'interruzione");
