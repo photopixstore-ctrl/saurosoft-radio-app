@@ -360,12 +360,17 @@ class _VinylArea extends StatelessWidget {
   }
 }
 
-/// Indicatore discreto del buffer (5 tacche): secondi di audio gia' scaricato
-/// ma non ancora suonato. Riceve il valore dal RadioAudioHandler (customEvent).
+/// Indicatore discreto del buffer: una barra continua che si riempie in
+/// proporzione ai secondi di audio gia' scaricato ma non ancora suonato
+/// (0-15 s, fondo scala a ~15 s = circa 360 KB a 192 kbps). Riceve il valore
+/// gia' "calmato" dal RadioAudioHandler (customEvent).
 class _BufferBars extends StatelessWidget {
   final AudioHandler audioHandler;
 
   const _BufferBars({required this.audioHandler});
+
+  static const double _fullSeconds = 15;
+  static const double _barWidth = 84;
 
   @override
   Widget build(BuildContext context) {
@@ -375,24 +380,32 @@ class _BufferBars extends StatelessWidget {
         final data = snapshot.data;
         final ahead =
             (data is Map && data['bufferAhead'] is num) ? (data['bufferAhead'] as num).toDouble() : 0.0;
-        final bars = ahead <= 0.5 ? 0 : (ahead / 3).ceil().clamp(1, 5).toInt();
+        final level = (ahead / _fullSeconds).clamp(0.0, 1.0);
         return Tooltip(
           message: 'Buffer: ${ahead.toStringAsFixed(0)} s',
           child: Row(
             mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.end,
             children: [
-              for (var i = 1; i <= 5; i++)
-                Container(
-                  width: 4,
-                  height: 6.0 + i * 2,
-                  margin: const EdgeInsets.symmetric(horizontal: 1.5),
+              Container(
+                width: _barWidth,
+                height: 5,
+                decoration: BoxDecoration(
+                  color: Colors.white24,
+                  borderRadius: BorderRadius.circular(3),
+                ),
+                alignment: Alignment.centerLeft,
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 900),
+                  curve: Curves.easeOut,
+                  width: _barWidth * level,
+                  height: 5,
                   decoration: BoxDecoration(
-                    color: i <= bars ? Colors.white70 : Colors.white24,
-                    borderRadius: BorderRadius.circular(2),
+                    color: Colors.white70,
+                    borderRadius: BorderRadius.circular(3),
                   ),
                 ),
-              const SizedBox(width: 6),
+              ),
+              const SizedBox(width: 8),
               const Text(
                 'buffer',
                 style: TextStyle(color: Colors.white54, fontSize: 10),
