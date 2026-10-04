@@ -123,7 +123,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   Future<void> _init() async {
-    DiagLog.log('--- avvio handler ---');
+    DiagLog.log('--- avvio handler (build rete v3) ---');
 
     _player.playbackEventStream.listen(
       (event) => _publishState(),
@@ -507,29 +507,60 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       }
       final stagnant = now.difference(_bufferGrewAt);
       if (_playedSeconds >= 8) {
+        final ahead = _bufferAheadSeconds();
+        // Il nuovo flusso parte circa dove sta suonando il vecchio (burst di
+        // ~15 s = stesso ritardo dal live): riconnettersi PRIMA che il buffer
+        // finisca, ma solo se la rete risponde (se e' giu', ricaricare
+        // fermerebbe l'audio residuo senza ottenere niente).
+        final nearEnd = ahead <= 3.5;
         if (stagnant > const Duration(seconds: 3) &&
             !_probing &&
-            (_networkWasDown || now.difference(_lastProbeAt) > const Duration(seconds: 10))) {
+            (_networkWasDown ||
+                (nearEnd && now.difference(_lastProbeAt) > const Duration(seconds: 3)) ||
+                now.difference(_lastProbeAt) > const Duration(seconds: 10))) {
           _probing = true;
           _lastProbeAt = now;
           unawaited(_liveIsUp().then((up) {
             _probing = false;
             if (!_wasPlayingBeforeError || _loadInFlight || _usingBackup) return;
+            final aheadNow = _bufferAheadSeconds();
+            DiagLog.log(
+              'sonda rete: ${up ? "ok" : "assente"} ahead=${aheadNow.toStringAsFixed(1)}s '
+              'fermo da ${DateTime.now().difference(_bufferGrewAt).inSeconds}s',
+            );
             if (!up) {
               _networkWasDown = true;
-            } else if (_networkWasDown) {
+              return;
+            }
+            if (_networkWasDown) {
+              // Rete tornata dopo un'interruzione: se il vecchio flusso
+              // riprende da solo (pause brevissime) non si tocca niente;
+              // se dopo 2 s non e' cresciuto, ci si riconnette subito.
               _networkWasDown = false;
+              final snapshot = _player.bufferedPosition;
+              Timer(const Duration(seconds: 2), () {
+                if (!_wasPlayingBeforeError || _loadInFlight || _usingBackup) return;
+                if (_player.bufferedPosition != snapshot) {
+                  DiagLog.log('flusso ripreso da solo dopo l'interruzione');
+                  return;
+                }
+                _handleStreamError(
+                  'rete tornata ma flusso fermo: riconnessione anticipata',
+                  delay: Duration.zero,
+                );
+              });
+            } else if (aheadNow <= 3.5) {
               _handleStreamError(
-                'rete tornata con il flusso fermo: riconnessione',
+                'flusso fermo con rete disponibile: riconnessione anticipata',
                 delay: Duration.zero,
               );
             }
           }));
         }
-        final ahead = _bufferAheadSeconds();
         if (state == ProcessingState.ready &&
             ahead <= 1.0 &&
-            stagnant > const Duration(seconds: 4)) {
+            stagnant > const Duration(seconds: 4) &&
+            !_networkWasDown) {
           _bufferGrewAt = now;
           _handleStreamError(
             'buffer quasi vuoto (${ahead.toStringAsFixed(1)} s) e fermo: riconnessione preventiva',
