@@ -175,7 +175,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       return null;
     });
 
-    mediaItem.add(_baseItem);
+    _pushMediaItem();
 
     // Nessun precaricamento dello stream all'avvio: una connessione aperta
     // senza ascoltare resta ferma mesi... e al primo play si rischia di
@@ -547,11 +547,12 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     _pushMediaItem();
   }
 
-  /// Pubblica il brano corrente. Il buffer NON e' piu' scritto nella riga
-  /// "album" (Domenico l'ha voluto togliere da sotto l'artista): in auto resta
-  /// solo il tasto con le tacche, sul telefono la barra sotto il tasto play.
+  /// Pubblica il brano corrente. La riga "album" (sotto l'artista su CarPlay e
+  /// lock screen) riporta il nome della radio; il buffer non e' piu' scritto
+  /// li' (Domenico l'ha voluto togliere): in auto resta il tasto con le
+  /// tacche, sul telefono la barra sotto il tasto play.
   void _pushMediaItem() {
-    mediaItem.add(_baseItem);
+    mediaItem.add(_baseItem.copyWith(album: RadioConfig.stationName));
   }
 
   /// Tacche del buffer per il tasto della schermata "In riproduzione" di
