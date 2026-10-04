@@ -76,6 +76,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   bool _usingBackup = false;
   bool _waitingForCarPlay = false;
   bool _interrupted = false;
+  DateTime? _interruptedAt;
   bool _loadInFlight = false;
   bool _sessionStarted = false;
   static final bool _isIos = Platform.isIOS;
@@ -123,7 +124,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   Future<void> _init() async {
-    DiagLog.log('--- avvio handler (build rete v3) ---');
+    DiagLog.log('--- avvio handler (build rete v4) ---');
 
     _player.playbackEventStream.listen(
       (event) => _publishState(),
@@ -211,6 +212,22 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       if (event.type == AudioInterruptionType.duck) return;
       _interrupted = event.begin;
       _stateSince = DateTime.now();
+      if (event.begin) {
+        _interruptedAt = DateTime.now();
+      } else if (_wasPlayingBeforeError && !_waitingForCarPlay) {
+        final at = _interruptedAt;
+        _interruptedAt = null;
+        // Dopo una pausa lunga (chiamata, WhatsApp) il player riprenderebbe
+        // dal punto fermo, in ritardo sulla diretta: ci si riallinea al live
+        // (e titoli/copertine tornano sincronizzati).
+        if (at != null && DateTime.now().difference(at) > const Duration(seconds: 20)) {
+          DiagLog.log('interruzione lunga: riallineo al live');
+          _cancelRecoveryState();
+          _usingBackup = false;
+          _consecutiveErrors = 0;
+          unawaited(_loadAndPlay(RadioConfig.streamUrl));
+        }
+      }
     });
 
     _becomingNoisySub = session.becomingNoisyEventStream.listen((_) {
@@ -440,14 +457,14 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     });
   }
 
-  Future<bool> _liveIsUp() async {
+  Future<bool> _liveIsUp({Duration timeout = const Duration(seconds: 5)}) async {
     final client = http.Client();
     try {
       final request = http.Request('GET', Uri.parse(RadioConfig.streamUrl))
         ..headers['User-Agent'] = 'SaurosoftRadioApp/1.0';
-      final response = await client.send(request).timeout(const Duration(seconds: 5));
+      final response = await client.send(request).timeout(timeout);
       if (response.statusCode != 200) return false;
-      final first = await response.stream.first.timeout(const Duration(seconds: 5));
+      final first = await response.stream.first.timeout(timeout);
       return first.isNotEmpty;
     } catch (_) {
       return false;
@@ -506,7 +523,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
         _networkWasDown = false;
       }
       final stagnant = now.difference(_bufferGrewAt);
-      if (_playedSeconds >= 8) {
+      if (_playedNow() >= 8) {
         final ahead = _bufferAheadSeconds();
         // Il nuovo flusso parte circa dove sta suonando il vecchio (burst di
         // ~15 s = stesso ritardo dal live): riconnettersi PRIMA che il buffer
@@ -520,7 +537,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
                 now.difference(_lastProbeAt) > const Duration(seconds: 10))) {
           _probing = true;
           _lastProbeAt = now;
-          unawaited(_liveIsUp().then((up) {
+          unawaited(_liveIsUp(timeout: const Duration(seconds: 2)).then((up) {
             _probing = false;
             if (!_wasPlayingBeforeError || _loadInFlight || _usingBackup) return;
             final aheadNow = _bufferAheadSeconds();
@@ -535,10 +552,10 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
             if (_networkWasDown) {
               // Rete tornata dopo un'interruzione: se il vecchio flusso
               // riprende da solo (pause brevissime) non si tocca niente;
-              // se dopo 2 s non e' cresciuto, ci si riconnette subito.
+              // se dopo 1 s non e' cresciuto, ci si riconnette subito.
               _networkWasDown = false;
               final snapshot = _player.bufferedPosition;
-              Timer(const Duration(seconds: 2), () {
+              Timer(const Duration(seconds: 1), () {
                 if (!_wasPlayingBeforeError || _loadInFlight || _usingBackup) return;
                 if (_player.bufferedPosition != snapshot) {
                   DiagLog.log("flusso ripreso da solo dopo l'interruzione");
@@ -684,6 +701,17 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       if (e.value > peak) peak = e.value;
     }
     return peak;
+  }
+
+  /// Secondi di ascolto effettivo dall'ultimo caricamento, aggiornati in
+  /// continuo (_playedSeconds cresce solo ai cambi di stato del player).
+  double _playedNow() {
+    var played = _playedSeconds;
+    final since = _activeSince;
+    if (since != null) {
+      played += DateTime.now().difference(since).inMilliseconds / 1000.0;
+    }
+    return played;
   }
 
   double _bufferAheadSeconds() {
