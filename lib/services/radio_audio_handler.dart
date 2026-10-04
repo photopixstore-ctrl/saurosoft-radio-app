@@ -43,21 +43,26 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   // the server" (visto nel log reale del 3/10, e spiega "play acceso ma
   // nessun audio" dopo una pausa lunga o uno stacco). Con false gli header
   // vanno direttamente ad AVPlayer, senza proxy.
-  final AudioPlayer _player = AudioPlayer(
-    useProxyForRequestHeaders: false,
-    audioLoadConfiguration: AudioLoadConfiguration(
-      darwinLoadControl: DarwinLoadControl(
-        automaticallyWaitsToMinimizeStalling: true,
-        preferredForwardBufferDuration: _forwardBuffer,
-      ),
-      androidLoadControl: AndroidLoadControl(
-        minBufferDuration: _forwardBuffer,
-        maxBufferDuration: const Duration(seconds: 30),
-        bufferForPlaybackDuration: _forwardBuffer,
-        bufferForPlaybackAfterRebufferDuration: _forwardBuffer,
-      ),
-    ),
-  );
+  //
+  // Non e' final: nel cambio senza stacco (_seamlessReload) il player attivo
+  // viene sostituito da uno nuovo gia' pronto.
+  late AudioPlayer _player = _createPlayer();
+
+  AudioPlayer _createPlayer() => AudioPlayer(
+        useProxyForRequestHeaders: false,
+        audioLoadConfiguration: AudioLoadConfiguration(
+          darwinLoadControl: DarwinLoadControl(
+            automaticallyWaitsToMinimizeStalling: true,
+            preferredForwardBufferDuration: _forwardBuffer,
+          ),
+          androidLoadControl: AndroidLoadControl(
+            minBufferDuration: _forwardBuffer,
+            maxBufferDuration: const Duration(seconds: 30),
+            bufferForPlaybackDuration: _forwardBuffer,
+            bufferForPlaybackAfterRebufferDuration: _forwardBuffer,
+          ),
+        ),
+      );
   final MetadataService _metadataService = MetadataService();
 
   Timer? _pollTimer;
@@ -67,6 +72,9 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   Timer? _backupRecoveryTimer;
   Timer? _carPlayWaitTimeout;
   StreamSubscription<PlayerState>? _playerStateSub;
+  StreamSubscription<PlaybackEvent>? _playbackEventSub;
+  // True mentre un nuovo player si prepara in parallelo a quello che suona.
+  bool _swapping = false;
   StreamSubscription<void>? _becomingNoisySub;
   StreamSubscription<void>? _devicesChangedSub;
   StreamSubscription<AudioInterruptionEvent>? _interruptionSub;
@@ -124,9 +132,44 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   Future<void> _init() async {
-    DiagLog.log('--- avvio handler (build rete v5) ---');
+    DiagLog.log('--- avvio handler (build rete v6) ---');
 
-    _player.playbackEventStream.listen(
+    _attachPlayerListeners();
+
+    await _watchAudioSession();
+
+    // La scena CarPlay (nativa, ios/Runner/CarPlaySceneDelegate.swift) chiede
+    // l'avvio dell'ascolto da qui: il motore Dart e' unico e condiviso con
+    // la schermata del telefono.
+    _carPlayChannel.setMethodCallHandler((call) async {
+      DiagLog.log('carplay -> ${call.method}');
+      switch (call.method) {
+        case 'play':
+          await play();
+          break;
+        case 'pause':
+          await pause();
+          break;
+      }
+      return null;
+    });
+
+    _pushMediaItem();
+
+    // Nessun precaricamento dello stream all'avvio: una connessione aperta
+    // senza ascoltare resta ferma mesi... e al primo play si rischia di
+    // riprendere una connessione ormai chiusa dal server. Ogni play() apre
+    // una connessione nuova (e non conta come ascoltatore chi apre l'app).
+    _startMetadataPolling();
+  }
+
+  /// Collega gli ascoltatori di stato/errori al player attivo (`_player`).
+  /// Va richiamato dopo ogni sostituzione del player.
+  void _attachPlayerListeners() {
+    _playbackEventSub?.cancel();
+    _playerStateSub?.cancel();
+
+    _playbackEventSub = _player.playbackEventStream.listen(
       (event) => _publishState(),
       onError: (Object e, StackTrace st) {
         DiagLog.log('playbackEvent error: ${e.runtimeType} $e');
@@ -164,32 +207,6 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
         _handleStreamError('completed');
       }
     });
-
-    await _watchAudioSession();
-
-    // La scena CarPlay (nativa, ios/Runner/CarPlaySceneDelegate.swift) chiede
-    // l'avvio dell'ascolto da qui: il motore Dart e' unico e condiviso con
-    // la schermata del telefono.
-    _carPlayChannel.setMethodCallHandler((call) async {
-      DiagLog.log('carplay -> ${call.method}');
-      switch (call.method) {
-        case 'play':
-          await play();
-          break;
-        case 'pause':
-          await pause();
-          break;
-      }
-      return null;
-    });
-
-    _pushMediaItem();
-
-    // Nessun precaricamento dello stream all'avvio: una connessione aperta
-    // senza ascoltare resta ferma mesi... e al primo play si rischia di
-    // riprendere una connessione ormai chiusa dal server. Ogni play() apre
-    // una connessione nuova (e non conta come ascoltatore chi apre l'app).
-    _startMetadataPolling();
   }
 
   /// Interruzioni audio e cambi di rotta (CarPlay/cuffie).
@@ -390,6 +407,86 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     }
   }
 
+  /// Cambio senza stacco: il nuovo flusso live si carica su un SECONDO player
+  /// mentre il primo continua a suonare l'audio che gli resta nel buffer; solo
+  /// a nuovo flusso pronto si passa a quello nuovo. (Con setAudioSource sul
+  /// player unico l'audio si fermava subito, anche con 6-9 s di buffer, e
+  /// restava il vuoto del ricaricamento: log reale 4/10, identico per tagli
+  /// da 5, 10 e 15 s.) Il nuovo flusso riparte circa 1-2 s prima del punto
+  /// in cui era il vecchio (burst del server): puo' ripetersi una frazione di
+  /// audio, ma niente silenzio. Se il caricamento fallisce si ricade sul
+  /// ricaricamento classico.
+  Future<void> _seamlessReload() async {
+    final gen = ++_loadGen;
+    _loadInFlight = true;
+    _swapping = true;
+    final startedAt = DateTime.now();
+    DiagLog.log(
+      'cambio senza stacco: preparo nuovo flusso (buffer residuo '
+      '${_bufferAheadSeconds().toStringAsFixed(1)}s)',
+    );
+    final fresh = _createPlayer();
+    var swapped = false;
+    try {
+      await fresh
+          .setAudioSource(
+            AudioSource.uri(
+              Uri.parse(RadioConfig.streamUrl),
+              headers: const {'User-Agent': 'SaurosoftRadioApp/1.0'},
+            ),
+          )
+          .timeout(const Duration(seconds: 8));
+      if (gen != _loadGen || !_wasPlayingBeforeError || _waitingForCarPlay) {
+        DiagLog.log('cambio senza stacco annullato');
+        return;
+      }
+      final old = _player;
+      final aheadAtSwap = _bufferAheadSeconds();
+      _player = fresh;
+      swapped = true;
+      final now = DateTime.now();
+      _playedSeconds = 0;
+      _activeSince = null;
+      _lastBufferedPos = Duration.zero;
+      _bufferGrewAt = now;
+      _networkWasDown = false;
+      _stateSince = now;
+      _attachPlayerListeners();
+      _startPlayer();
+      unawaited(() async {
+        try {
+          await old.setVolume(0);
+          await old.stop();
+        } catch (_) {}
+        try {
+          await old.dispose();
+        } catch (_) {}
+      }());
+      _lastLoadOffline = false;
+      DiagLog.log(
+        'cambio senza stacco: fatto in '
+        '${DateTime.now().difference(startedAt).inMilliseconds} ms '
+        '(buffer vecchio residuo ${aheadAtSwap.toStringAsFixed(1)}s)',
+      );
+    } on PlayerInterruptedException {
+      DiagLog.log('cambio senza stacco interrotto');
+    } catch (e) {
+      DiagLog.log('cambio senza stacco fallito: ${e.runtimeType} $e');
+      if (gen == _loadGen) {
+        _lastLoadOffline = _isOfflineError(e);
+        _loadInFlight = false;
+        _swapping = false;
+        // Ricaricamento classico (il vecchio flusso e' comunque in stallo).
+        unawaited(_loadAndPlay(RadioConfig.streamUrl));
+      }
+    } finally {
+      if (!swapped) unawaited(fresh.dispose().catchError((Object _) {}));
+      if (gen == _loadGen) _loadInFlight = false;
+      _swapping = false;
+      _publishState();
+    }
+  }
+
   bool _isOfflineError(Object e) {
     final text = e.toString().toLowerCase();
     return text.contains('-1009') || text.contains('appears to be offline');
@@ -417,7 +514,16 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   /// .backupStreamUrl, su Serverplan, indipendente dalla VPS del live).
   Future<void> _recover() async {
     _retryTimer = null;
-    if (!_wasPlayingBeforeError || _waitingForCarPlay) return;
+    if (!_wasPlayingBeforeError || _waitingForCarPlay || _swapping) return;
+    // Live ancora in riproduzione con audio nel buffer: nuovo flusso preparato
+    // in parallelo, senza interrompere quello che sta suonando.
+    if (!_usingBackup &&
+        _player.playing &&
+        _player.processingState == ProcessingState.ready &&
+        _bufferAheadSeconds() >= 1.5) {
+      await _seamlessReload();
+      return;
+    }
     // Senza rete anche il file di riserva e' irraggiungibile e, al ritorno
     // della rete, partirebbe da capo (stacco udibile): si insiste sul LIVE.
     if (!_lastLoadOffline) {
@@ -871,6 +977,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     _backupRecoveryTimer?.cancel();
     _carPlayWaitTimeout?.cancel();
     _playerStateSub?.cancel();
+    _playbackEventSub?.cancel();
     _becomingNoisySub?.cancel();
     _devicesChangedSub?.cancel();
     _interruptionSub?.cancel();
