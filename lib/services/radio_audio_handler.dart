@@ -539,7 +539,13 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   /// li' (Domenico l'ha voluto togliere): in auto resta il tasto con le
   /// tacche, sul telefono la barra sotto il tasto play.
   void _pushMediaItem() {
-    mediaItem.add(_baseItem.copyWith(album: RadioConfig.stationName));
+    // Il nome deve comparire in UN solo punto: se titolo o artista sono gia' il
+    // nome della radio (jingle, nessun metadato) la riga album resta vuota.
+    final alreadyShown = _baseItem.title == RadioConfig.stationName ||
+        _baseItem.artist == RadioConfig.stationName;
+    mediaItem.add(
+      alreadyShown ? _baseItem : _baseItem.copyWith(album: RadioConfig.stationName),
+    );
   }
 
   /// Tacche del buffer per il tasto della schermata "In riproduzione" di
