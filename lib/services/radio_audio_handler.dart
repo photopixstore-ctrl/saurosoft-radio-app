@@ -132,7 +132,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   Future<void> _init() async {
-    DiagLog.log('--- avvio handler (build rete v6) ---');
+    DiagLog.log('--- avvio handler (build rete v7) ---');
 
     _attachPlayerListeners();
 
@@ -640,6 +640,12 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
             !_probing &&
             (_networkWasDown ||
                 (nearEnd && now.difference(_lastProbeAt) > const Duration(seconds: 3)) ||
+                // Buffer fermo da oltre 5 s: non e' un normale arrivo a blocchi
+                // (log reale 4/10: taglio da 5 s, rete tornata, flusso morto,
+                // l'audio si fermava ~10 s dopo perche' si aspettava il buffer
+                // quasi vuoto prima di riconnettersi).
+                (stagnant > const Duration(seconds: 5) &&
+                    now.difference(_lastProbeAt) > const Duration(seconds: 2)) ||
                 now.difference(_lastProbeAt) > const Duration(seconds: 10))) {
           _probing = true;
           _lastProbeAt = now;
@@ -676,7 +682,10 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
                   delay: Duration.zero,
                 );
               });
-            } else if (aheadNow <= 3.5) {
+            } else if (aheadNow <= 3.5 ||
+                DateTime.now().difference(_bufferGrewAt) >= const Duration(seconds: 5)) {
+              // Con il cambio senza stacco riconnettersi presto non costa
+              // niente: il vecchio audio continua fino al passaggio.
               _handleStreamError(
                 'flusso fermo con rete disponibile: riconnessione anticipata',
                 delay: Duration.zero,
@@ -806,6 +815,9 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     _aheadHistory.add(MapEntry(now, raw));
     _aheadHistory.removeWhere((e) => now.difference(e.key) > const Duration(seconds: 14));
     if (raw <= 1.5) return raw;
+    // Buffer che non si riempie da oltre 4 s (interruzione di rete): la barra
+    // deve mostrare il calo reale, non il massimo recente.
+    if (now.difference(_bufferGrewAt) > const Duration(seconds: 4)) return raw;
     var peak = raw;
     for (final e in _aheadHistory) {
       if (e.value > peak) peak = e.value;
