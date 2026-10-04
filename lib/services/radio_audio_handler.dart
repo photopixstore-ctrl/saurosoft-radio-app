@@ -7,7 +7,6 @@ import 'package:http/http.dart' as http;
 import 'package:just_audio/just_audio.dart';
 import '../radio_config.dart';
 import 'diag_log.dart';
-import 'disc_artwork.dart';
 import 'metadata_service.dart';
 
 /// Cuore dell'app: un solo AudioHandler che alimenta contemporaneamente
@@ -524,26 +523,14 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       title: nowPlaying.title,
       artist: nowPlaying.subtitle(),
       artUri: Uri.parse(nowPlaying.cover),
-      // La schermata del telefono mostra sempre la copertina originale,
-      // anche quando artUri diventa il disco per CarPlay/lock screen.
+      // Copertina originale: in auto e sulla lock screen resta quella standard
+      // (niente effetto disco, scelta di Domenico); il disco e' solo nell'app.
       extras: {
         'cover': nowPlaying.cover,
         if (nowPlaying.songStartMs != null) 'songStartMs': nowPlaying.songStartMs,
         if (nowPlaying.durationSec != null) 'songDurationSec': nowPlaying.durationSec,
       },
     );
-    _pushMediaItem();
-    if (_isIos && nowPlaying.cover != RadioConfig.fallbackLogoUrl) {
-      unawaited(_applyDiscArtwork(nowPlaying.cover));
-    }
-  }
-
-  /// Sostituisce la copertina di CarPlay/lock screen con quella a forma di
-  /// disco in vinile, se riesce a comporla e il brano e' ancora lo stesso.
-  Future<void> _applyDiscArtwork(String cover) async {
-    final disc = await DiscArtwork.compose(cover);
-    if (disc == null || _baseItem.extras?['cover'] != cover) return;
-    _baseItem = _baseItem.copyWith(artUri: disc);
     _pushMediaItem();
   }
 
