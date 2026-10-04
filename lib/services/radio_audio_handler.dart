@@ -97,6 +97,11 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   double _playedSeconds = 0;
   Duration _lastBufferedPos = Duration.zero;
   DateTime _bufferGrewAt = DateTime.now();
+  DateTime _lastProbeAt = DateTime.fromMillisecondsSinceEpoch(0);
+  bool _probing = false;
+  bool _networkWasDown = false;
+  // Ultimo errore di caricamento causato da rete assente (-1009).
+  bool _lastLoadOffline = false;
   DateTime? _activeSince;
   int _bufferBars = -1;
   DateTime _lastBarsPush = DateTime.fromMillisecondsSinceEpoch(0);
@@ -348,6 +353,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       if (gen != _loadGen) return;
       DiagLog.log('load ok');
       _loadInFlight = false;
+      _lastLoadOffline = false;
       if (_wasPlayingBeforeError && !_waitingForCarPlay) _startPlayer();
     } on PlayerInterruptedException {
       DiagLog.log('load interrotto (sostituito da uno piu\' recente)');
@@ -355,12 +361,21 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       DiagLog.log('load fallito: ${e.runtimeType} $e');
       if (gen == _loadGen) {
         _loadInFlight = false;
-        _handleStreamError('load fallito');
+        _lastLoadOffline = _isOfflineError(e);
+        _handleStreamError(
+          'load fallito',
+          delay: Duration(seconds: _lastLoadOffline ? 2 : 3),
+        );
       }
     } finally {
       if (gen == _loadGen) _loadInFlight = false;
       _publishState();
     }
+  }
+
+  bool _isOfflineError(Object e) {
+    final text = e.toString().toLowerCase();
+    return text.contains('-1009') || text.contains('appears to be offline');
   }
 
   /// play() del player senza attenderlo (il suo Future termina solo quando
@@ -386,10 +401,14 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   Future<void> _recover() async {
     _retryTimer = null;
     if (!_wasPlayingBeforeError || _waitingForCarPlay) return;
-    _consecutiveErrors++;
-    if (!_usingBackup && _consecutiveErrors >= 2) {
-      _usingBackup = true;
-      _startBackupRecoveryTimer();
+    // Senza rete anche il file di riserva e' irraggiungibile e, al ritorno
+    // della rete, partirebbe da capo (stacco udibile): si insiste sul LIVE.
+    if (!_lastLoadOffline) {
+      _consecutiveErrors++;
+      if (!_usingBackup && _consecutiveErrors >= 2) {
+        _usingBackup = true;
+        _startBackupRecoveryTimer();
+      }
     }
     DiagLog.log(
       'recupero #$_consecutiveErrors -> ${_usingBackup ? "BACKUP" : "live"}',
@@ -469,27 +488,55 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     final state = _player.processingState;
     final stuck = DateTime.now().difference(_stateSince);
 
-    // Riconnessione preventiva (log reale 4/10): la connessione live si
-    // blocca ("zombie") ma la rete c'e': una nuova connessione riparte in ~1 s.
-    // Invece di aspettare buffering + 5 s, si riconnette appena il buffer e'
-    // quasi vuoto E non cresce da qualche secondo.
-    if (_player.playing && !_usingBackup && state == ProcessingState.ready) {
+    // Connessione live ferma (log reale 4/10). Due casi distinti:
+    // (a) la rete e' sparita e poi torna: appena un controllo leggero la
+    //     ritrova si riconnette SUBITO, quando nel buffer c'e' ancora audio:
+    //     il nuovo flusso parte circa dove sta suonando il vecchio (stacco
+    //     minimo, niente file di riserva);
+    // (b) la rete c'e' ma la connessione e' bloccata ("zombie"): si
+    //     riconnette appena il buffer e' quasi vuoto e non cresce.
+    if (_player.playing &&
+        !_usingBackup &&
+        (state == ProcessingState.ready || state == ProcessingState.buffering)) {
       final now = DateTime.now();
       final buffered = _player.bufferedPosition;
       if (buffered != _lastBufferedPos) {
         _lastBufferedPos = buffered;
         _bufferGrewAt = now;
+        _networkWasDown = false;
       }
-      final ahead = _bufferAheadSeconds();
-      if (_playedSeconds >= 8 &&
-          ahead <= 1.0 &&
-          now.difference(_bufferGrewAt) > const Duration(seconds: 4)) {
-        _bufferGrewAt = now;
-        _handleStreamError(
-          'buffer quasi vuoto (${ahead.toStringAsFixed(1)} s) e fermo: riconnessione preventiva',
-          delay: Duration.zero,
-        );
-        return;
+      final stagnant = now.difference(_bufferGrewAt);
+      if (_playedSeconds >= 8) {
+        if (stagnant > const Duration(seconds: 3) &&
+            !_probing &&
+            (_networkWasDown || now.difference(_lastProbeAt) > const Duration(seconds: 10))) {
+          _probing = true;
+          _lastProbeAt = now;
+          unawaited(_liveIsUp().then((up) {
+            _probing = false;
+            if (!_wasPlayingBeforeError || _loadInFlight || _usingBackup) return;
+            if (!up) {
+              _networkWasDown = true;
+            } else if (_networkWasDown) {
+              _networkWasDown = false;
+              _handleStreamError(
+                'rete tornata con il flusso fermo: riconnessione',
+                delay: Duration.zero,
+              );
+            }
+          }));
+        }
+        final ahead = _bufferAheadSeconds();
+        if (state == ProcessingState.ready &&
+            ahead <= 1.0 &&
+            stagnant > const Duration(seconds: 4)) {
+          _bufferGrewAt = now;
+          _handleStreamError(
+            'buffer quasi vuoto (${ahead.toStringAsFixed(1)} s) e fermo: riconnessione preventiva',
+            delay: Duration.zero,
+          );
+          return;
+        }
       }
     }
 
