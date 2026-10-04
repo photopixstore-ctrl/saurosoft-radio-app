@@ -77,6 +77,13 @@ class DiscArtwork {
     const s = _size / 2.0;
     const center = ui.Offset(s, s);
 
+    // Fondo scuro (colore dell'app): senza, gli angoli trasparenti su CarPlay
+    // diventano un riquadro chiaro attorno al disco.
+    canvas.drawRect(
+      ui.Rect.fromLTWH(0, 0, _size.toDouble(), _size.toDouble()),
+      ui.Paint()..color = const ui.Color(0xFF12151C),
+    );
+
     // Disco nero con leggero degradé.
     canvas.drawCircle(
       center,

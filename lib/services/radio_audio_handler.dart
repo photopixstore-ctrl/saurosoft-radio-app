@@ -369,11 +369,11 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
 
   /// Qualsiasi segnale di stream interrotto passa da qui. Piu' segnali
   /// ravvicinati si fondono in un solo tentativo dopo 3 secondi.
-  void _handleStreamError(String why) {
+  void _handleStreamError(String why, {Duration delay = const Duration(seconds: 3)}) {
     DiagLog.log('problema stream: $why');
     if (!_wasPlayingBeforeError || _waitingForCarPlay) return;
     if (_retryTimer?.isActive ?? false) return;
-    _retryTimer = Timer(const Duration(seconds: 3), _recover);
+    _retryTimer = Timer(delay, _recover);
   }
 
   /// Se il LIVE continua a fallire (errori ripetuti, non un singolo blip),
@@ -484,7 +484,10 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     Duration limit;
     if (state == ProcessingState.buffering) {
       // Il backup e' un file finito: un rallentamento e' un normale buffering.
-      limit = _usingBackup ? const Duration(seconds: 25) : const Duration(seconds: 10);
+      // Live: dopo uno stallo la riconnessione e' sempre migliore di
+      // aspettare (log reale 4/10: connessione ferma ~25 s, 17 s di silenzio
+      // con il vecchio limite di 10 s + 3 s di attesa).
+      limit = _usingBackup ? const Duration(seconds: 25) : const Duration(seconds: 5);
     } else if (state == ProcessingState.loading) {
       limit = const Duration(seconds: 12);
     } else {
@@ -492,7 +495,10 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     }
     if (stuck > limit) {
       _stateSince = DateTime.now();
-      _handleStreamError('bloccato in ${state.name} da ${stuck.inSeconds}s');
+      _handleStreamError(
+        'bloccato in ${state.name} da ${stuck.inSeconds}s',
+        delay: const Duration(seconds: 1),
+      );
     }
   }
 
