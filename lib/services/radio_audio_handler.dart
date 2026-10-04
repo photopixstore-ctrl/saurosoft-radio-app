@@ -95,6 +95,8 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   // 10s, ~13s in piu' del tempo ascoltato). Il buffer si ricava quindi
   // sottraendo il tempo di ascolto effettivo (ready+playing) misurato qui.
   double _playedSeconds = 0;
+  Duration _lastBufferedPos = Duration.zero;
+  DateTime _bufferGrewAt = DateTime.now();
   DateTime? _activeSince;
   int _bufferBars = -1;
   DateTime _lastBarsPush = DateTime.fromMillisecondsSinceEpoch(0);
@@ -337,6 +339,8 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     _loadInFlight = true;
     _playedSeconds = 0;
     _activeSince = null;
+    _lastBufferedPos = Duration.zero;
+    _bufferGrewAt = DateTime.now();
     _publishState();
     DiagLog.log('load start -> $url');
     try {
@@ -464,6 +468,30 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
 
     final state = _player.processingState;
     final stuck = DateTime.now().difference(_stateSince);
+
+    // Riconnessione preventiva (log reale 4/10): la connessione live si
+    // blocca ("zombie") ma la rete c'e': una nuova connessione riparte in ~1 s.
+    // Invece di aspettare buffering + 5 s, si riconnette appena il buffer e'
+    // quasi vuoto E non cresce da qualche secondo.
+    if (_player.playing && !_usingBackup && state == ProcessingState.ready) {
+      final now = DateTime.now();
+      final buffered = _player.bufferedPosition;
+      if (buffered != _lastBufferedPos) {
+        _lastBufferedPos = buffered;
+        _bufferGrewAt = now;
+      }
+      final ahead = _bufferAheadSeconds();
+      if (_playedSeconds >= 8 &&
+          ahead <= 1.0 &&
+          now.difference(_bufferGrewAt) > const Duration(seconds: 4)) {
+        _bufferGrewAt = now;
+        _handleStreamError(
+          'buffer quasi vuoto (${ahead.toStringAsFixed(1)} s) e fermo: riconnessione preventiva',
+          delay: Duration.zero,
+        );
+        return;
+      }
+    }
 
     if (_player.playing && state == ProcessingState.ready) {
       if (stuck > const Duration(seconds: 10)) _consecutiveErrors = 0;
