@@ -132,7 +132,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   Future<void> _init() async {
-    DiagLog.log('--- avvio handler (build rete v9) ---');
+    DiagLog.log('--- avvio handler (build rete v10) ---');
 
     _attachPlayerListeners();
 
@@ -426,6 +426,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       '${_bufferAheadSeconds().toStringAsFixed(1)}s)',
     );
     final fresh = _createPlayer();
+    final bufferedAtStart = _player.bufferedPosition;
     var swapped = false;
     try {
       await fresh
@@ -438,6 +439,14 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
           .timeout(const Duration(seconds: 8));
       if (gen != _loadGen || !_wasPlayingBeforeError || _waitingForCarPlay) {
         DiagLog.log('cambio senza stacco annullato');
+        return;
+      }
+      // Se mentre il nuovo flusso si caricava il vecchio e' ripreso da solo
+      // (buffer cresciuto), il cambio non serve: farlo ripeterebbe audio
+      // (log reale 6/10: stallo di 9 s, vecchio flusso ripreso 1 s dopo, il
+      // cambio ha ripetuto ~4 s).
+      if (_player.bufferedPosition - bufferedAtStart >= const Duration(seconds: 3)) {
+        DiagLog.log("cambio senza stacco annullato: il vecchio flusso e' ripreso da solo");
         return;
       }
       final old = _player;
@@ -818,7 +827,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     if (raw <= 1.5) return raw;
     // Rete assente o buffer fermo da oltre 8 s (interruzione vera): la barra
     // deve mostrare il calo reale, non il massimo recente.
-    if (_networkWasDown || now.difference(_bufferGrewAt) > const Duration(seconds: 8)) return raw;
+    if (_networkWasDown || now.difference(_bufferGrewAt) > const Duration(seconds: 6)) return raw;
     var peak = raw;
     for (final e in _aheadHistory) {
       if (e.value > peak) peak = e.value;
@@ -862,8 +871,12 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       bars = ahead <= 0.5 ? 0 : (ahead / 3).ceil().clamp(1, 5).toInt();
     }
     final now = DateTime.now();
-    if (bars != _bufferBars &&
-        (bars <= 0 || now.difference(_lastBarsPush) > const Duration(seconds: 6))) {
+    // Durante un'interruzione la barra in auto deve seguire il calo reale:
+    // aggiornamento ogni 2 s invece di 6.
+    final falling = _networkWasDown ||
+        now.difference(_bufferGrewAt) > const Duration(seconds: 6);
+    final minGap = Duration(seconds: falling ? 2 : 6);
+    if (bars != _bufferBars && (bars <= 0 || now.difference(_lastBarsPush) > minGap)) {
       _bufferBars = bars;
       _lastBarsPush = now;
       _sendBarsToCarPlay(bars);
