@@ -148,6 +148,16 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPT
     updateBufferButton(CarPlayBridge.shared.bufferBars)
 
     loadPlaylist()
+
+    // Avvio automatico quando il telefono si collega a CarPlay (richiesta di
+    // Domenico, 6/10): la connessione CarPlay risveglia l'app anche se era in
+    // memoria o sospesa, quindi la radio parte senza toccare lo schermo. Una
+    // breve attesa lascia il tempo all'uscita audio di passare all'auto.
+    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+      guard let self = self, let controller = self.interfaceController else { return }
+      CarPlayBridge.shared.invoke("play")
+      controller.pushTemplate(CPNowPlayingTemplate.shared, animated: true, completion: nil)
+    }
   }
 
   func templateApplicationScene(
