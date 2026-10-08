@@ -9,7 +9,7 @@ import '../models/now_playing.dart';
 /// La copertina arriva gia' risolta dal server: qui non serve fare
 /// nessuna ricerca aggiuntiva su iTunes/Deezer lato app.
 class MetadataService {
-  Future<NowPlaying> fetchNowPlaying() async {
+  Future<NowPlaying?> fetchNowPlaying() async {
     final timestamp = DateTime.now().millisecondsSinceEpoch;
     final uri = Uri.parse('${RadioConfig.metadataUrl}?t=$timestamp');
 
@@ -29,6 +29,8 @@ class MetadataService {
     } catch (_) {
       // In caso di errore di rete/timeout si mantiene lo stato precedente
     }
-    return NowPlaying.fallback();
+    // null = nessun dato nuovo: chi chiama tiene il titolo che c'era (prima si
+    // sostituiva con il titolo di ripiego, e la copertina restava ferma).
+    return null;
   }
 }

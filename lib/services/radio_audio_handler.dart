@@ -82,6 +82,18 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   static const double _slowSpeed = 0.985;
   static const bool _slowdownEnabled = false;
 
+  // Flusso dedicato alle app: se non risponde si ripiega su radio.mp3 per qualche minuto.
+  DateTime? _appStreamBadUntil;
+  Timer? _metaTimer;
+  // Correzione fine del ritardo dei titoli (secondi, anche negativa): da tarare in prova.
+  static const double _metadataOffsetSec = 0.0;
+
+  String _liveUrl() {
+    final bad = _appStreamBadUntil;
+    if (bad != null && DateTime.now().isBefore(bad)) return RadioConfig.streamUrl;
+    return RadioConfig.appStreamUrl;
+  }
+
   // Volume: salita graduale all'avvio e discesa rapida in pausa (a volume alto
   // lo stacco spaventa chi preme play).
   static const Duration _fadeInManual = Duration(seconds: 2);
@@ -151,7 +163,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   Future<void> _init() async {
-    DiagLog.log('--- avvio handler (build rete v12) ---');
+    DiagLog.log('--- avvio handler (build rete v13) ---');
 
     _attachPlayerListeners();
 
@@ -272,7 +284,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
           _cancelRecoveryState();
           _usingBackup = false;
           _consecutiveErrors = 0;
-          unawaited(_loadAndPlay(RadioConfig.streamUrl));
+          unawaited(_loadAndPlay(_liveUrl()));
         } else {
           unawaited(_fadeTo(1.0, const Duration(seconds: 1)));
         }
@@ -330,7 +342,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
         DiagLog.log('CarPlay tornato: riprendo con connessione fresca');
         _startLiveness();
         await _loadAndPlay(
-          _usingBackup ? RadioConfig.backupStreamUrl : RadioConfig.streamUrl,
+          _usingBackup ? RadioConfig.backupStreamUrl : _liveUrl(),
         );
       }
     });
@@ -397,16 +409,43 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     return _player.setAudioSource(
       AudioSource.uri(
         Uri.parse(url),
-        headers: const {'User-Agent': 'SaurosoftRadioApp/1.0'},
+        headers: {'User-Agent': RadioConfig.userAgent},
       ),
     );
+  }
+
+  /// Carica la sorgente con tentativi ripetuti: dopo un taglio di rete i primi
+  /// pacchetti si perdono e iOS ritenta con attese sempre piu' lunghe (3, 5, 11 s
+  /// nei log reali dell'8/10). Un nuovo tentativo ogni pochi secondi aggancia la
+  /// rete appena torna.
+  Future<void> _setSourceRetrying(String url, int gen) async {
+    const attempts = [
+      Duration(milliseconds: 2500),
+      Duration(milliseconds: 2500),
+      Duration(seconds: 4),
+      Duration(seconds: 6),
+    ];
+    for (var i = 0; i < attempts.length; i++) {
+      try {
+        await _setSource(url).timeout(attempts[i]);
+        return;
+      } on TimeoutException {
+        if (gen != _loadGen) return;
+        if (i == attempts.length - 1) rethrow;
+        DiagLog.log('caricamento lento (tentativo ${i + 1}): riprovo');
+      }
+    }
   }
 
   /// Carica `url` da zero e, se l'utente vuole ascoltare, avvia la
   /// riproduzione. E' l'UNICO punto che carica sorgenti per il recupero:
   /// ogni chiamata invalida le precedenti (_loadGen), cosi' non possono mai
   /// sovrapporsi due caricamenti che si cancellano a vicenda.
-  Future<void> _loadAndPlay(String url, {Duration startDelay = Duration.zero}) async {
+  Future<void> _loadAndPlay(
+    String url, {
+    Duration startDelay = Duration.zero,
+    bool manualStart = false,
+  }) async {
     final gen = ++_loadGen;
     _loadInFlight = true;
     _resetSpeed();
@@ -417,7 +456,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     _publishState();
     DiagLog.log('load start -> $url');
     try {
-      await _setSource(url).timeout(const Duration(seconds: 15));
+      await _setSourceRetrying(url, gen);
       if (gen != _loadGen) return;
       DiagLog.log('load ok');
       if (startDelay > Duration.zero) {
@@ -439,7 +478,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
         _startPlayer();
         unawaited(_fadeTo(
           1.0,
-          startDelay > Duration.zero ? _fadeInManual : _fadeInRecovery,
+          manualStart ? _fadeInManual : _fadeInRecovery,
         ));
       }
     } on PlayerInterruptedException {
@@ -449,6 +488,11 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       if (gen == _loadGen) {
         _loadInFlight = false;
         _lastLoadOffline = _isOfflineError(e);
+        if (url == RadioConfig.appStreamUrl && !_lastLoadOffline) {
+          _appStreamBadUntil = DateTime.now().add(const Duration(minutes: 3));
+          _consecutiveErrors = 0;
+          DiagLog.log('flusso app non risponde: ripiego su radio.mp3 per 3 minuti');
+        }
         _handleStreamError(
           'load fallito',
           delay: Duration(seconds: _lastLoadOffline ? 2 : 3),
@@ -479,18 +523,34 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       '${_bufferAheadSeconds().toStringAsFixed(1)}s)',
     );
     _lastTrouble = DateTime.now();
-    final fresh = _createPlayer();
+    var fresh = _createPlayer();
     final bufferedAtStart = _player.bufferedPosition;
     var swapped = false;
     try {
-      await fresh
-          .setAudioSource(
-            AudioSource.uri(
-              Uri.parse(RadioConfig.streamUrl),
-              headers: const {'User-Agent': 'SaurosoftRadioApp/1.0'},
-            ),
-          )
-          .timeout(const Duration(seconds: 8));
+      const swapAttempts = [
+        Duration(milliseconds: 2500),
+        Duration(milliseconds: 2500),
+        Duration(seconds: 4),
+      ];
+      for (var i = 0; i < swapAttempts.length; i++) {
+        try {
+          await fresh
+              .setAudioSource(
+                AudioSource.uri(
+                  Uri.parse(_liveUrl()),
+                  headers: {'User-Agent': RadioConfig.userAgent},
+                ),
+              )
+              .timeout(swapAttempts[i]);
+          break;
+        } on TimeoutException {
+          if (i == swapAttempts.length - 1) rethrow;
+          if (gen != _loadGen) break;
+          DiagLog.log('cambio senza stacco: caricamento lento (tentativo ${i + 1}), riprovo');
+          unawaited(fresh.dispose().catchError((Object _) {}));
+          fresh = _createPlayer();
+        }
+      }
       if (gen != _loadGen || !_wasPlayingBeforeError || _waitingForCarPlay) {
         DiagLog.log('cambio senza stacco annullato');
         return;
@@ -627,7 +687,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       _consecutiveErrors = 0;
       _backupRecoveryTimer?.cancel();
       _backupRecoveryTimer = null;
-      await _loadAndPlay(RadioConfig.streamUrl);
+      await _loadAndPlay(_liveUrl());
     });
   }
 
@@ -635,7 +695,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     final client = http.Client();
     try {
       final request = http.Request('GET', Uri.parse(RadioConfig.streamUrl))
-        ..headers['User-Agent'] = 'SaurosoftRadioApp/1.0';
+        ..headers['User-Agent'] = '${RadioConfig.userAgent}-probe';
       final response = await client.send(request).timeout(timeout);
       if (response.statusCode != 200) return false;
       final first = await response.stream.first.timeout(timeout);
@@ -827,6 +887,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
 
   Future<void> _refreshMetadata() async {
     final nowPlaying = await _metadataService.fetchNowPlaying();
+    if (nowPlaying == null) return;
     if (nowPlaying.artist == _lastArtist && nowPlaying.title == _lastTitle) {
       return;
     }
@@ -848,18 +909,21 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
         if (nowPlaying.durationSec != null) 'songDurationSec': nowPlaying.durationSec,
       },
     );
-    // Il suono arriva con il ritardo del buffer: titolo e copertina compaiono
-    // con lo stesso ritardo, cosi' restano sincronizzati con quello che si sente.
+    // Il suono arriva con il ritardo del buffer (~30 s): titolo e copertina
+    // compaiono con lo stesso ritardo. Un solo timer: l'ultimo cambio vince, e
+    // un aggiornamento vecchio non puo' piu' coprirne uno nuovo.
+    _metaTimer?.cancel();
+    _metaTimer = null;
     final listening =
         _player.playing && _player.processingState == ProcessingState.ready;
-    final delaySec = listening ? _bufferAheadSeconds() : 0.0;
+    final delaySec = listening ? _bufferAheadSeconds() + _metadataOffsetSec : 0.0;
     void apply() {
       _baseItem = item;
       _pushMediaItem();
     }
 
     if (delaySec >= 1.5) {
-      Timer(Duration(milliseconds: (delaySec * 1000).round()), apply);
+      _metaTimer = Timer(Duration(milliseconds: (delaySec * 1000).round()), apply);
     } else {
       apply();
     }
@@ -1102,7 +1166,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     _consecutiveErrors = 0;
     _interrupted = false;
     _startLiveness();
-    await _loadAndPlay(RadioConfig.streamUrl, startDelay: _startDelay);
+    await _loadAndPlay(_liveUrl(), manualStart: true);
   }
 
   @override

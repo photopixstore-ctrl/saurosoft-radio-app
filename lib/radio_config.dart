@@ -1,3 +1,5 @@
+import 'dart:io' show Platform;
+
 /// ============================================================
 /// RADIO CONFIG - UNICO FILE DA MODIFICARE PER OGNI CLIENTE
 /// ============================================================
@@ -14,6 +16,21 @@ class RadioConfig {
   // sostituisce il vecchio host nr11.newradio.it dismesso con la migrazione)
   static const String streamUrl =
       'https://streaming.saurosoftradio.it/listen/saurosoft_radio/radio.mp3';
+
+  // Flusso dedicato alle app (relay locale di radio.mp3 con raffica iniziale
+  // di ~30 s invece di ~15 s: il buffer di 30 s c'e' fin dall'avvio e dopo ogni
+  // riconnessione). Stesso audio e stessa qualita'. Se non risponde, l'app
+  // ripiega su streamUrl. Il parametro ?app= finisce nei log di Icecast e
+  // permette statistiche separate per piattaforma.
+  static const String appStreamBase =
+      'https://streaming.saurosoftradio.it/listen/saurosoft_radio/app.mp3';
+  static String get appStreamUrl =>
+      '$appStreamBase?app=${Platform.isIOS ? 'ios' : 'android'}';
+
+  // Versione mostrata nello User-Agent (tenere allineata a pubspec.yaml).
+  static const String appVersion = '1.0.1';
+  static String get userAgent =>
+      Platform.isIOS ? 'SaurosoftRadio-iOS/$appVersion' : 'SaurosoftRadio-Android/$appVersion';
 
   // File mp3 di riserva ospitato su Serverplan (hosting saurosoftradio.it),
   // indipendente dalla VPS Contabo che ospita AzuraCast/Icecast: se il live
