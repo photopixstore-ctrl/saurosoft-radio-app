@@ -79,7 +79,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   bool _swapping = false;
 
   // Rallentamento lato app (v11): mai lato server.
-  static const double _slowSpeed = 0.98;
+  static const double _slowSpeed = 0.985;
   static const Duration _startDelay = Duration(seconds: 3);
   double _speed = 1.0;
   DateTime _lastTrouble = DateTime.fromMillisecondsSinceEpoch(0);
@@ -142,7 +142,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   Future<void> _init() async {
-    DiagLog.log('--- avvio handler (build rete v11) ---');
+    DiagLog.log('--- avvio handler (build rete v11b) ---');
 
     _attachPlayerListeners();
 
@@ -878,12 +878,12 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   /// Rallentamento leggero, SOLO lato app (il server manda sempre a velocita'
-  /// normale): con segnale debole (buffer che cresce a fatica) o dopo problemi
-  /// recenti la riproduzione va al 98%, cosi' il buffer cresce di 0,02 s al
-  /// secondo fino a ~30 s. Si ferma al tetto e quando non serve piu'. Mai
-  /// durante interruzioni, cambi di flusso o caricamenti.
+  /// normale), SEMPRE acceso dall'avvio: la riproduzione va al 98,5%, cosi' il
+  /// buffer cresce di 0,015 s al secondo fino a ~30 s (una galleria improvvisa
+  /// non lascia il tempo di reagire: il margine va costruito prima). Si ferma
+  /// al tetto e si riaccende da solo se il buffer scende (per esempio dopo un
+  /// cambio di flusso). Mai durante interruzioni, cambi di flusso, caricamenti.
   void _updateSlowdown() {
-    final now = DateTime.now();
     final active = _player.playing &&
         _player.processingState == ProcessingState.ready &&
         !_usingBackup &&
@@ -892,27 +892,12 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
         !_swapping &&
         !_waitingForCarPlay;
     if (!active) {
-      _growthLog.clear();
       _resetSpeed();
       return;
     }
-    final buffered = _player.bufferedPosition;
-    _growthLog.add(MapEntry(now, buffered));
-    _growthLog.removeWhere((e) => now.difference(e.key) > const Duration(seconds: 60));
     final ahead = _bufferAheadSeconds();
-    var weak = false;
-    final first = _growthLog.first;
-    final span = now.difference(first.key).inMilliseconds / 1000.0;
-    // Finestra di 60 s: il buffer arriva a blocchi di ~10 s, su finestre
-    // piu' corte il rapporto oscilla e darebbe falsi allarmi.
-    if (span >= 45 && ahead < 28) {
-      final grown = (buffered - first.value).inMilliseconds / 1000.0;
-      weak = grown / span < 0.8;
-    }
-    final trouble = now.difference(_lastTrouble) < const Duration(minutes: 10);
-    final needed = weak || trouble;
     final limit = _speed == _slowSpeed ? 30.0 : 29.0;
-    final target = (needed && ahead < limit) ? _slowSpeed : 1.0;
+    final target = ahead < limit ? _slowSpeed : 1.0;
     if (target != _speed) _setSpeed(target);
   }
 
