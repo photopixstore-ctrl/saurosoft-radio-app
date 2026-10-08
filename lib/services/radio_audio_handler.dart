@@ -80,6 +80,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
 
   // Rallentamento lato app (v11): mai lato server.
   static const double _slowSpeed = 0.985;
+  static const bool _slowdownEnabled = false;
   static const Duration _startDelay = Duration(seconds: 3);
   double _speed = 1.0;
   DateTime _lastTrouble = DateTime.fromMillisecondsSinceEpoch(0);
@@ -142,7 +143,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   Future<void> _init() async {
-    DiagLog.log('--- avvio handler (build rete v11b) ---');
+    DiagLog.log('--- avvio handler (build rete v11c) ---');
 
     _attachPlayerListeners();
 
@@ -884,6 +885,13 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   /// al tetto e si riaccende da solo se il buffer scende (per esempio dopo un
   /// cambio di flusso). Mai durante interruzioni, cambi di flusso, caricamenti.
   void _updateSlowdown() {
+    // DISATTIVATO (8/10, prova di Domenico su iPhone): a 0,985x la qualita'
+    // audio peggiora in modo evidente (l'algoritmo di rallentamento di iOS non
+    // conserva il suono). Il resto del buffer a 30 s (pause di sistema) resta.
+    if (!_slowdownEnabled) {
+      _resetSpeed();
+      return;
+    }
     final active = _player.playing &&
         _player.processingState == ProcessingState.ready &&
         !_usingBackup &&
