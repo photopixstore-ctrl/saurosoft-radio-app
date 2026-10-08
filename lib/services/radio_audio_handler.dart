@@ -666,7 +666,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       'recupero #$_consecutiveErrors -> ${_usingBackup ? "BACKUP" : "live"}',
     );
     await _loadAndPlay(
-      _usingBackup ? RadioConfig.backupStreamUrl : RadioConfig.streamUrl,
+      _usingBackup ? RadioConfig.backupStreamUrl : _liveUrl(),
     );
   }
 
