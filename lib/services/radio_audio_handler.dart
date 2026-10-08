@@ -1103,7 +1103,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     customEvent.add({'bufferAhead': ahead});
     var bars = -1;
     if (active) {
-      bars = ahead <= 0.5 ? 0 : (ahead / 6).ceil().clamp(1, 5).toInt();
+      bars = ahead <= 0.5 ? 0 : (ahead / 5).ceil().clamp(1, 5).toInt();
     }
     final now = DateTime.now();
     // Durante un'interruzione la barra in auto deve seguire il calo reale:

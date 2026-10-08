@@ -369,7 +369,8 @@ class _BufferBars extends StatelessWidget {
 
   const _BufferBars({required this.audioHandler});
 
-  static const double _fullSeconds = 30;
+  // Barra piena da 25 s in su: il buffer reale oscilla (arriva a blocchi) tra ~24 e 30 s.
+  static const double _fullSeconds = 25;
   static const double _barWidth = 84;
 
   @override
