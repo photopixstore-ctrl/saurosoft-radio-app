@@ -513,7 +513,8 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   /// in cui era il vecchio (burst del server): puo' ripetersi una frazione di
   /// audio, ma niente silenzio. Se il caricamento fallisce si ricade sul
   /// ricaricamento classico.
-  Future<void> _seamlessReload() async {
+  Future<void> _seamlessReload({String? urlOverride}) async {
+    final target = urlOverride ?? _liveUrl();
     final gen = ++_loadGen;
     _loadInFlight = true;
     _swapping = true;
@@ -537,7 +538,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
           await fresh
               .setAudioSource(
                 AudioSource.uri(
-                  Uri.parse(_liveUrl()),
+                  Uri.parse(target),
                   headers: {'User-Agent': RadioConfig.userAgent},
                 ),
               )
@@ -604,7 +605,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
         _loadInFlight = false;
         _swapping = false;
         // Ricaricamento classico (il vecchio flusso e' comunque in stallo).
-        unawaited(_loadAndPlay(RadioConfig.streamUrl));
+        unawaited(_loadAndPlay(target));
       }
     } finally {
       if (!swapped) unawaited(fresh.dispose().catchError((Object _) {}));
@@ -673,7 +674,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   /// la riproduzione in corso) se il live e' tornato; se si', ci si torna.
   void _startBackupRecoveryTimer() {
     _backupRecoveryTimer?.cancel();
-    _backupRecoveryTimer = Timer.periodic(const Duration(seconds: 30), (_) async {
+    _backupRecoveryTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
       if (!_usingBackup) {
         _backupRecoveryTimer?.cancel();
         _backupRecoveryTimer = null;
@@ -687,8 +688,44 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       _consecutiveErrors = 0;
       _backupRecoveryTimer?.cancel();
       _backupRecoveryTimer = null;
-      await _loadAndPlay(_liveUrl());
+      if (_player.playing && _player.processingState == ProcessingState.ready) {
+        await _seamlessReload();
+      } else {
+        await _loadAndPlay(_liveUrl());
+      }
     });
+  }
+
+  /// Controllo di riferimento su un host indipendente dalla radio (stesso
+  /// hosting del file di riserva): se risponde, la rete del telefono c'e' e se il
+  /// flusso non risponde e' la RADIO ad essere caduta, non la rete.
+  Future<bool> _referenceIsUp() async {
+    try {
+      final r = await http
+          .get(Uri.parse('${RadioConfig.metadataUrl}?t=${DateTime.now().millisecondsSinceEpoch}'))
+          .timeout(const Duration(seconds: 2));
+      return r.statusCode == 200;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Radio caduta con la rete a posto: niente buffer da aspettare ne' tentativi
+  /// a vuoto, si passa subito al file di riserva (il nuovo audio si carica su un
+  /// secondo player mentre quello vecchio suona ancora, poi si scambia).
+  void _switchToBackupNow() {
+    if (_usingBackup || _loadInFlight || !_wasPlayingBeforeError || _waitingForCarPlay) return;
+    DiagLog.log('radio caduta (rete ok): passo subito al file di riserva');
+    _usingBackup = true;
+    _lastTrouble = DateTime.now();
+    _startBackupRecoveryTimer();
+    final canSwap =
+        _player.playing && _player.processingState == ProcessingState.ready;
+    if (canSwap) {
+      unawaited(_seamlessReload(urlOverride: RadioConfig.backupStreamUrl));
+    } else {
+      unawaited(_loadAndPlay(RadioConfig.backupStreamUrl));
+    }
   }
 
   Future<bool> _liveIsUp({Duration timeout = const Duration(seconds: 5)}) async {
@@ -779,7 +816,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
                 now.difference(_lastProbeAt) > const Duration(seconds: 10))) {
           _probing = true;
           _lastProbeAt = now;
-          unawaited(_liveIsUp(timeout: const Duration(seconds: 2)).then((up) {
+          unawaited(_liveIsUp(timeout: const Duration(seconds: 2)).then((up) async {
             _probing = false;
             if (!_wasPlayingBeforeError || _loadInFlight || _usingBackup) return;
             final aheadNow = _bufferAheadSeconds();
@@ -788,8 +825,18 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
               'fermo da ${DateTime.now().difference(_bufferGrewAt).inSeconds}s',
             );
             if (!up) {
-              _networkWasDown = true;
               _lastTrouble = DateTime.now();
+              // Flusso fermo da piu' di 5 s e non risponde: rete assente o radio caduta?
+              final stalled =
+                  DateTime.now().difference(_bufferGrewAt) > const Duration(seconds: 5);
+              final referenceUp = stalled ? await _referenceIsUp() : false;
+              if (!_wasPlayingBeforeError || _loadInFlight || _usingBackup) return;
+              if (referenceUp) {
+                _networkWasDown = false;
+                _switchToBackupNow();
+              } else {
+                _networkWasDown = true;
+              }
               return;
             }
             if (_networkWasDown) {
