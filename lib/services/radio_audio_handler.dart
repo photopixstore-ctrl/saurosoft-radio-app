@@ -81,6 +81,14 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   // Rallentamento lato app (v11): mai lato server.
   static const double _slowSpeed = 0.985;
   static const bool _slowdownEnabled = false;
+
+  // Volume: salita graduale all'avvio e discesa rapida in pausa (a volume alto
+  // lo stacco spaventa chi preme play).
+  static const Duration _fadeInManual = Duration(seconds: 2);
+  static const Duration _fadeInRecovery = Duration(milliseconds: 800);
+  static const Duration _fadeOutTime = Duration(milliseconds: 500);
+  double _volume = 1.0;
+  int _fadeGen = 0;
   static const Duration _startDelay = Duration(seconds: 3);
   double _speed = 1.0;
   DateTime _lastTrouble = DateTime.fromMillisecondsSinceEpoch(0);
@@ -143,7 +151,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   Future<void> _init() async {
-    DiagLog.log('--- avvio handler (build rete v11c) ---');
+    DiagLog.log('--- avvio handler (build rete v12) ---');
 
     _attachPlayerListeners();
 
@@ -243,6 +251,12 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       if (event.begin) {
         _interruptedAt = DateTime.now();
         _aheadAtInterruption = _bufferAheadSeconds();
+        if (_wasPlayingBeforeError) {
+          // Alla ripresa il suono rientra piano.
+          _fadeGen++;
+          _volume = 0.0;
+          unawaited(_player.setVolume(0.0).catchError((Object _) {}));
+        }
       } else if (_wasPlayingBeforeError && !_waitingForCarPlay) {
         final at = _interruptedAt;
         _interruptedAt = null;
@@ -259,6 +273,8 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
           _usingBackup = false;
           _consecutiveErrors = 0;
           unawaited(_loadAndPlay(RadioConfig.streamUrl));
+        } else {
+          unawaited(_fadeTo(1.0, const Duration(seconds: 1)));
         }
       }
     });
@@ -359,6 +375,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       bufferedPosition: _player.bufferedPosition,
       speed: _player.speed,
     ));
+    _disableSkipCommands();
   }
 
   AudioProcessingState _mapProcessingState(ProcessingState state) {
@@ -411,7 +428,20 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       }
       _loadInFlight = false;
       _lastLoadOffline = false;
-      if (_wasPlayingBeforeError && !_waitingForCarPlay) _startPlayer();
+      if (_wasPlayingBeforeError && !_waitingForCarPlay) {
+        // Avvio con volume a zero e salita graduale.
+        _fadeGen++;
+        _volume = 0.0;
+        try {
+          await _player.setVolume(0.0);
+        } catch (_) {}
+        if (gen != _loadGen) return;
+        _startPlayer();
+        unawaited(_fadeTo(
+          1.0,
+          startDelay > Duration.zero ? _fadeInManual : _fadeInRecovery,
+        ));
+      }
     } on PlayerInterruptedException {
       DiagLog.log('load interrotto (sostituito da uno piu\' recente)');
     } catch (e) {
@@ -477,6 +507,8 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       final aheadAtSwap = _bufferAheadSeconds();
       _player = fresh;
       swapped = true;
+      _fadeGen++;
+      _volume = 1.0;
       _speed = 1.0;
       _growthLog.clear();
       final now = DateTime.now();
@@ -758,6 +790,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
         _stateSince = DateTime.now();
         DiagLog.log('pronto ma non in play: rilancio play()');
         _startPlayer();
+        unawaited(_fadeTo(1.0, _fadeInRecovery));
       }
       return;
     }
@@ -876,6 +909,49 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       if (e.value > peak) peak = e.value;
     }
     return peak;
+  }
+
+  /// Porta il volume del player a `target` in `d`, a piccoli gradini. Ogni
+  /// nuova chiamata annulla la precedente (_fadeGen). Salita con curva
+  /// quadratica (parte molto piano), discesa lineare.
+  Future<void> _fadeTo(double target, Duration d) async {
+    final gen = ++_fadeGen;
+    final from = _volume;
+    final int steps = (d.inMilliseconds / 50).ceil().clamp(1, 100).toInt();
+    for (var i = 1; i <= steps; i++) {
+      if (gen != _fadeGen) return;
+      final t = i / steps;
+      final shaped = target > from ? t * t : t;
+      final double v = (from + (target - from) * shaped).clamp(0.0, 1.0).toDouble();
+      _volume = v;
+      try {
+        await _player.setVolume(v);
+      } catch (_) {}
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    }
+  }
+
+  /// Discesa del volume prima di fermare il player (solo se sta suonando).
+  Future<void> _fadeOutNow() async {
+    if (!_player.playing) return;
+    await _fadeTo(0.0, _fadeOutTime);
+  }
+
+  /// Dopo lo stop il volume torna a 1: il prossimo avvio lo azzera da solo.
+  Future<void> _restoreVolume() async {
+    _fadeGen++;
+    _volume = 1.0;
+    try {
+      await _player.setVolume(1.0);
+    } catch (_) {}
+  }
+
+  /// Spegne i tasti di salto/riavvolgimento nelle schermate di sistema
+  /// (blocco, centro di controllo, CarPlay): in una radio dal vivo non servono.
+  /// Va ripetuto a ogni cambio di stato perche' la libreria li riabilita.
+  void _disableSkipCommands() {
+    if (!_isIos) return;
+    unawaited(_carPlayChannel.invokeMethod<void>('disableSkip').catchError((Object _) {}));
   }
 
   /// Rallentamento leggero, SOLO lato app (il server manda sempre a velocita'
@@ -1037,7 +1113,9 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     _stopLiveness();
     // Stesso comportamento di LiveOnlyPlayer.pause(): stop vero, non una
     // pausa che tiene il buffer, cosi' alla ripresa si riparte dal vivo.
+    await _fadeOutNow();
     await _player.stop();
+    await _restoreVolume();
     _publishState();
     _clearBuffer();
   }
@@ -1048,7 +1126,9 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     _wasPlayingBeforeError = false;
     _cancelRecoveryState();
     _stopLiveness();
+    await _fadeOutNow();
     await _player.stop();
+    await _restoreVolume();
     _publishState();
     _clearBuffer();
     // Su iOS niente super.stop(): porterebbe lo stato a idle e audio_service

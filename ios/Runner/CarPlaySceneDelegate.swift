@@ -1,5 +1,6 @@
 import CarPlay
 import Flutter
+import MediaPlayer
 import UIKit
 
 /// Ponte nativo <-> Dart. Nativo -> Dart: la scena CarPlay chiede al player
@@ -18,6 +19,22 @@ final class CarPlayBridge {
   private(set) var bufferBars: Int = -1
   var onBufferChanged: ((Int) -> Void)?
 
+  /// Radio dal vivo: niente salto avanti/indietro, niente barra di avanzamento.
+  static func disableSkipCommands() {
+    let c = MPRemoteCommandCenter.shared()
+    c.skipForwardCommand.isEnabled = false
+    c.skipBackwardCommand.isEnabled = false
+    c.seekForwardCommand.isEnabled = false
+    c.seekBackwardCommand.isEnabled = false
+    c.changePlaybackPositionCommand.isEnabled = false
+    c.nextTrackCommand.isEnabled = false
+    c.previousTrackCommand.isEnabled = false
+    if var info = MPNowPlayingInfoCenter.default().nowPlayingInfo {
+      info[MPNowPlayingInfoPropertyIsLiveStream] = true
+      MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+    }
+  }
+
   private func attachHandler() {
     channel?.setMethodCallHandler { [weak self] call, result in
       if call.method == "buffer" {
@@ -25,6 +42,16 @@ final class CarPlayBridge {
         DispatchQueue.main.async {
           self?.bufferBars = bars
           self?.onBufferChanged?(bars)
+        }
+        result(nil)
+      } else if call.method == "disableSkip" {
+        DispatchQueue.main.async {
+          CarPlayBridge.disableSkipCommands()
+          // La libreria audio_service li riabilita in modo asincrono: si
+          // ripete poco dopo.
+          DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            CarPlayBridge.disableSkipCommands()
+          }
         }
         result(nil)
       } else {
