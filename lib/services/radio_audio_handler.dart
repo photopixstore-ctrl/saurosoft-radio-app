@@ -23,16 +23,18 @@ import 'metadata_service.dart';
 /// "bloccato" (loading/buffering/idle/completed) mentre l'utente vuole
 /// ascoltare. Tutto cio' che accade finisce in DiagLog.
 class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
-  // Tiene sempre ~15s di audio gia' scaricato ma non ancora suonato
-  // (il server Icecast manda gia' un burst iniziale di ~15s per
-  // riempirlo subito). Cosi' un buco di rete breve (es. galleria in
+  // Tiene fino a 30 s di audio gia' scaricato ma non ancora suonato: ~15 s
+  // arrivano subito (burst del server Icecast), il resto si guadagna con la
+  // pausa di 3 s all'avvio, con le pause di sistema (chiamate) e con un lieve
+  // rallentamento lato app (_updateSlowdown). Cosi' un buco di rete breve (es. galleria in
   // auto) viene assorbito dal buffer e non si sente affatto.
   //
   // automaticallyWaitsToMinimizeStalling resta TRUE (default Apple): con
   // false AVPlayer, dopo uno stallo, puo' restare fermo senza ripartire da
   // solo anche quando il buffer si riempie di nuovo (stato "play acceso
   // ma nessun audio").
-  static const _forwardBuffer = Duration(seconds: 15);
+  static const _forwardBuffer = Duration(seconds: 30);
+  static const _startBuffer = Duration(seconds: 15);
 
   // useProxyForRequestHeaders: false e' FONDAMENTALE. Con gli header
   // personalizzati (User-Agent) just_audio, di default, fa passare l'audio da
@@ -57,9 +59,9 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
           ),
           androidLoadControl: AndroidLoadControl(
             minBufferDuration: _forwardBuffer,
-            maxBufferDuration: const Duration(seconds: 30),
-            bufferForPlaybackDuration: _forwardBuffer,
-            bufferForPlaybackAfterRebufferDuration: _forwardBuffer,
+            maxBufferDuration: const Duration(seconds: 40),
+            bufferForPlaybackDuration: _startBuffer,
+            bufferForPlaybackAfterRebufferDuration: _startBuffer,
           ),
         ),
       );
@@ -75,6 +77,14 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   StreamSubscription<PlaybackEvent>? _playbackEventSub;
   // True mentre un nuovo player si prepara in parallelo a quello che suona.
   bool _swapping = false;
+
+  // Rallentamento lato app (v11): mai lato server.
+  static const double _slowSpeed = 0.98;
+  static const Duration _startDelay = Duration(seconds: 3);
+  double _speed = 1.0;
+  DateTime _lastTrouble = DateTime.fromMillisecondsSinceEpoch(0);
+  double _aheadAtInterruption = 0;
+  final List<MapEntry<DateTime, Duration>> _growthLog = [];
   StreamSubscription<void>? _becomingNoisySub;
   StreamSubscription<void>? _devicesChangedSub;
   StreamSubscription<AudioInterruptionEvent>? _interruptionSub;
@@ -132,7 +142,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   Future<void> _init() async {
-    DiagLog.log('--- avvio handler (build rete v10) ---');
+    DiagLog.log('--- avvio handler (build rete v11) ---');
 
     _attachPlayerListeners();
 
@@ -188,7 +198,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       _stateSince = now;
       final activeSince = _activeSince;
       if (activeSince != null) {
-        _playedSeconds += now.difference(activeSince).inMilliseconds / 1000.0;
+        _playedSeconds += now.difference(activeSince).inMilliseconds / 1000.0 * _speed;
         _activeSince = null;
       }
       if (state.playing && state.processingState == ProcessingState.ready) {
@@ -231,13 +241,18 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       _stateSince = DateTime.now();
       if (event.begin) {
         _interruptedAt = DateTime.now();
+        _aheadAtInterruption = _bufferAheadSeconds();
       } else if (_wasPlayingBeforeError && !_waitingForCarPlay) {
         final at = _interruptedAt;
         _interruptedAt = null;
         // Dopo una pausa lunga (chiamata, WhatsApp) il player riprenderebbe
         // dal punto fermo, in ritardo sulla diretta: ci si riallinea al live
         // (e titoli/copertine tornano sincronizzati).
-        if (at != null && DateTime.now().difference(at) > const Duration(seconds: 20)) {
+        // Si riparte dal buffer finche' il ritardo totale resta entro 30 s
+        // (buffer a inizio pausa + durata della pausa); oltre, si riallinea.
+        final limitSec = (30.0 - _aheadAtInterruption - 1.0).clamp(3.0, 30.0);
+        if (at != null &&
+            DateTime.now().difference(at).inMilliseconds / 1000.0 > limitSec) {
           DiagLog.log('interruzione lunga: riallineo al live');
           _cancelRecoveryState();
           _usingBackup = false;
@@ -373,9 +388,10 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   /// riproduzione. E' l'UNICO punto che carica sorgenti per il recupero:
   /// ogni chiamata invalida le precedenti (_loadGen), cosi' non possono mai
   /// sovrapporsi due caricamenti che si cancellano a vicenda.
-  Future<void> _loadAndPlay(String url) async {
+  Future<void> _loadAndPlay(String url, {Duration startDelay = Duration.zero}) async {
     final gen = ++_loadGen;
     _loadInFlight = true;
+    _resetSpeed();
     _playedSeconds = 0;
     _activeSince = null;
     _lastBufferedPos = Duration.zero;
@@ -386,6 +402,12 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       await _setSource(url).timeout(const Duration(seconds: 15));
       if (gen != _loadGen) return;
       DiagLog.log('load ok');
+      if (startDelay > Duration.zero) {
+        // Attesa iniziale: il buffer sale di altri secondi prima di suonare.
+        DiagLog.log('attesa iniziale di ${startDelay.inSeconds} s per il buffer');
+        await Future<void>.delayed(startDelay);
+        if (gen != _loadGen) return;
+      }
       _loadInFlight = false;
       _lastLoadOffline = false;
       if (_wasPlayingBeforeError && !_waitingForCarPlay) _startPlayer();
@@ -425,6 +447,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       'cambio senza stacco: preparo nuovo flusso (buffer residuo '
       '${_bufferAheadSeconds().toStringAsFixed(1)}s)',
     );
+    _lastTrouble = DateTime.now();
     final fresh = _createPlayer();
     final bufferedAtStart = _player.bufferedPosition;
     var swapped = false;
@@ -453,6 +476,8 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       final aheadAtSwap = _bufferAheadSeconds();
       _player = fresh;
       swapped = true;
+      _speed = 1.0;
+      _growthLog.clear();
       final now = DateTime.now();
       _playedSeconds = 0;
       _activeSince = null;
@@ -513,6 +538,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   /// ravvicinati si fondono in un solo tentativo dopo 3 secondi.
   void _handleStreamError(String why, {Duration delay = const Duration(seconds: 3)}) {
     DiagLog.log('problema stream: $why');
+    _lastTrouble = DateTime.now();
     if (!_wasPlayingBeforeError || _waitingForCarPlay) return;
     if (_retryTimer?.isActive ?? false) return;
     _retryTimer = Timer(delay, _recover);
@@ -606,6 +632,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     if (!_wasPlayingBeforeError) return;
     _tickCount++;
     _publishBuffer();
+    _updateSlowdown();
     if (_tickCount % 10 == 0) {
       DiagLog.log(
         'health playing=${_player.playing} proc=${_player.processingState.name} '
@@ -669,6 +696,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
             );
             if (!up) {
               _networkWasDown = true;
+              _lastTrouble = DateTime.now();
               return;
             }
             if (_networkWasDown) {
@@ -771,7 +799,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     _lastArtist = nowPlaying.artist;
     _lastTitle = nowPlaying.title;
 
-    _baseItem = MediaItem(
+    final item = MediaItem(
       id: RadioConfig.streamUrl,
       title: nowPlaying.title,
       artist: nowPlaying.subtitle(),
@@ -786,7 +814,21 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
         if (nowPlaying.durationSec != null) 'songDurationSec': nowPlaying.durationSec,
       },
     );
-    _pushMediaItem();
+    // Il suono arriva con il ritardo del buffer: titolo e copertina compaiono
+    // con lo stesso ritardo, cosi' restano sincronizzati con quello che si sente.
+    final listening =
+        _player.playing && _player.processingState == ProcessingState.ready;
+    final delaySec = listening ? _bufferAheadSeconds() : 0.0;
+    void apply() {
+      _baseItem = item;
+      _pushMediaItem();
+    }
+
+    if (delaySec >= 1.5) {
+      Timer(Duration(milliseconds: (delaySec * 1000).round()), apply);
+    } else {
+      apply();
+    }
   }
 
   /// Pubblica il brano corrente. La riga "album" (sotto l'artista su CarPlay e
@@ -835,13 +877,73 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     return peak;
   }
 
+  /// Rallentamento leggero, SOLO lato app (il server manda sempre a velocita'
+  /// normale): con segnale debole (buffer che cresce a fatica) o dopo problemi
+  /// recenti la riproduzione va al 98%, cosi' il buffer cresce di 0,02 s al
+  /// secondo fino a ~30 s. Si ferma al tetto e quando non serve piu'. Mai
+  /// durante interruzioni, cambi di flusso o caricamenti.
+  void _updateSlowdown() {
+    final now = DateTime.now();
+    final active = _player.playing &&
+        _player.processingState == ProcessingState.ready &&
+        !_usingBackup &&
+        !_interrupted &&
+        !_loadInFlight &&
+        !_swapping &&
+        !_waitingForCarPlay;
+    if (!active) {
+      _growthLog.clear();
+      _resetSpeed();
+      return;
+    }
+    final buffered = _player.bufferedPosition;
+    _growthLog.add(MapEntry(now, buffered));
+    _growthLog.removeWhere((e) => now.difference(e.key) > const Duration(seconds: 60));
+    final ahead = _bufferAheadSeconds();
+    var weak = false;
+    final first = _growthLog.first;
+    final span = now.difference(first.key).inMilliseconds / 1000.0;
+    // Finestra di 60 s: il buffer arriva a blocchi di ~10 s, su finestre
+    // piu' corte il rapporto oscilla e darebbe falsi allarmi.
+    if (span >= 45 && ahead < 28) {
+      final grown = (buffered - first.value).inMilliseconds / 1000.0;
+      weak = grown / span < 0.8;
+    }
+    final trouble = now.difference(_lastTrouble) < const Duration(minutes: 10);
+    final needed = weak || trouble;
+    final limit = _speed == _slowSpeed ? 30.0 : 29.0;
+    final target = (needed && ahead < limit) ? _slowSpeed : 1.0;
+    if (target != _speed) _setSpeed(target);
+  }
+
+  void _setSpeed(double v) {
+    if (v == _speed) return;
+    final since = _activeSince;
+    if (since != null) {
+      final now = DateTime.now();
+      _playedSeconds += now.difference(since).inMilliseconds / 1000.0 * _speed;
+      _activeSince = now;
+    }
+    _speed = v;
+    DiagLog.log(
+      'velocita ${v.toStringAsFixed(2)}x (buffer ${_bufferAheadSeconds().toStringAsFixed(1)} s)',
+    );
+    unawaited(_player.setSpeed(v).catchError((Object e) {
+      DiagLog.log('setSpeed errore: $e');
+    }));
+  }
+
+  void _resetSpeed() {
+    if (_speed != 1.0) _setSpeed(1.0);
+  }
+
   /// Secondi di ascolto effettivo dall'ultimo caricamento, aggiornati in
   /// continuo (_playedSeconds cresce solo ai cambi di stato del player).
   double _playedNow() {
     var played = _playedSeconds;
     final since = _activeSince;
     if (since != null) {
-      played += DateTime.now().difference(since).inMilliseconds / 1000.0;
+      played += DateTime.now().difference(since).inMilliseconds / 1000.0 * _speed;
     }
     return played;
   }
@@ -850,7 +952,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     var played = _playedSeconds;
     final since = _activeSince;
     if (since != null) {
-      played += DateTime.now().difference(since).inMilliseconds / 1000.0;
+      played += DateTime.now().difference(since).inMilliseconds / 1000.0 * _speed;
     }
     final ahead = _player.bufferedPosition.inMilliseconds / 1000.0 - played;
     if (ahead < 0) return 0;
@@ -868,7 +970,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     customEvent.add({'bufferAhead': ahead});
     var bars = -1;
     if (active) {
-      bars = ahead <= 0.5 ? 0 : (ahead / 3).ceil().clamp(1, 5).toInt();
+      bars = ahead <= 0.5 ? 0 : (ahead / 6).ceil().clamp(1, 5).toInt();
     }
     final now = DateTime.now();
     // Durante un'interruzione la barra in auto deve seguire il calo reale:
@@ -931,7 +1033,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     _consecutiveErrors = 0;
     _interrupted = false;
     _startLiveness();
-    await _loadAndPlay(RadioConfig.streamUrl);
+    await _loadAndPlay(RadioConfig.streamUrl, startDelay: _startDelay);
   }
 
   @override

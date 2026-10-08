@@ -369,7 +369,7 @@ class _BufferBars extends StatelessWidget {
 
   const _BufferBars({required this.audioHandler});
 
-  static const double _fullSeconds = 15;
+  static const double _fullSeconds = 30;
   static const double _barWidth = 84;
 
   @override
