@@ -48,7 +48,10 @@ class NowPlaying {
     return NowPlaying(
       durationSec: songStartMs != null ? duration : null,
       songStartMs: songStartMs,
-      title: (json['title'] ?? RadioConfig.stationName).toString(),
+      // Titolo vuoto (stazione ferma o riavvio): si mostra il nome della radio.
+      title: ((json['title'] ?? '').toString().trim().isEmpty)
+          ? RadioConfig.stationName
+          : json['title'].toString(),
       artist: (json['artist'] ?? '').toString(),
       year: (json['year'] ?? '').toString(),
       cover: cover.isEmpty ? RadioConfig.fallbackLogoUrl : cover,

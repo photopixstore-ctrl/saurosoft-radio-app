@@ -164,7 +164,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   Future<void> _init() async {
-    DiagLog.log('--- avvio handler (build rete v13d) ---');
+    DiagLog.log('--- avvio handler (build rete v13e) ---');
 
     _attachPlayerListeners();
 
@@ -515,7 +515,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   /// in cui era il vecchio (burst del server): puo' ripetersi una frazione di
   /// audio, ma niente silenzio. Se il caricamento fallisce si ricade sul
   /// ricaricamento classico.
-  Future<void> _seamlessReload({String? urlOverride}) async {
+  Future<void> _seamlessReload({String? urlOverride, bool fromBackup = false}) async {
     final target = urlOverride ?? _liveUrl();
     final gen = ++_loadGen;
     _loadInFlight = true;
@@ -562,7 +562,10 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       // (buffer cresciuto), il cambio non serve: farlo ripeterebbe audio
       // (log reale 6/10: stallo di 9 s, vecchio flusso ripreso 1 s dopo, il
       // cambio ha ripetuto ~4 s).
-      if (_player.bufferedPosition - bufferedAtStart >= const Duration(seconds: 3)) {
+      // (Non vale se si sta lasciando il file di riserva: li' il buffer cresce
+      // sempre e annullare il cambio lascerebbe l'app sul backup per sempre.)
+      if (!fromBackup &&
+          _player.bufferedPosition - bufferedAtStart >= const Duration(seconds: 3)) {
         DiagLog.log("cambio senza stacco annullato: il vecchio flusso e' ripreso da solo");
         return;
       }
@@ -606,8 +609,26 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
         _lastLoadOffline = _isOfflineError(e);
         _loadInFlight = false;
         _swapping = false;
-        // Ricaricamento classico (il vecchio flusso e' comunque in stallo).
-        unawaited(_loadAndPlay(target));
+        // Il flusso dedicato alle app non risponde (es. relay /app.mp3 ancora giu'
+        // dopo un riavvio di Icecast mentre /radio.mp3 e' gia' tornato): si ripiega
+        // su radio.mp3 per 3 minuti e si riprova SUBITO, lasciando suonare il
+        // vecchio audio (file di riserva) invece di fermarlo con un ricaricamento.
+        if (target == RadioConfig.appStreamUrl && !_lastLoadOffline) {
+          _appStreamBadUntil = DateTime.now().add(const Duration(minutes: 3));
+          DiagLog.log('flusso app non risponde: ripiego su radio.mp3 per 3 minuti');
+        }
+        final retryTarget =
+            target == RadioConfig.appStreamUrl ? _liveUrl() : target;
+        final oldStillPlaying =
+            _player.playing && _player.processingState == ProcessingState.ready;
+        if (retryTarget != target && oldStillPlaying) {
+          Future<void>.delayed(Duration.zero, () {
+            unawaited(_seamlessReload(urlOverride: retryTarget, fromBackup: fromBackup));
+          });
+        } else {
+          // Ricaricamento classico (il vecchio flusso e' comunque in stallo).
+          unawaited(_loadAndPlay(retryTarget));
+        }
       }
     } finally {
       if (!swapped) unawaited(fresh.dispose().catchError((Object _) {}));
@@ -691,7 +712,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       _backupRecoveryTimer?.cancel();
       _backupRecoveryTimer = null;
       if (_player.playing && _player.processingState == ProcessingState.ready) {
-        await _seamlessReload();
+        await _seamlessReload(fromBackup: true);
       } else {
         await _loadAndPlay(_liveUrl());
       }
