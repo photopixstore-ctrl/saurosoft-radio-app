@@ -71,7 +71,7 @@ class RadioConfig {
   static const String iosBundleId = 'it.photopix.saurosoft_radio';
 
   // Intervallo di polling dei metadati (secondi) - stesso valore usato in Android
-  static const int metadataPollIntervalSeconds = 12;
+  static const int metadataPollIntervalSeconds = 4;
 
   // Testo mostrato nella sezione "Info" dell'app
   static const String infoText =
