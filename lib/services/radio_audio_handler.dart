@@ -117,6 +117,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   bool _interrupted = false;
   DateTime? _interruptedAt;
   bool _loadInFlight = false;
+  DateTime _lastLoadOkAt = DateTime.fromMillisecondsSinceEpoch(0);
   bool _sessionStarted = false;
   static final bool _isIos = Platform.isIOS;
   static const MethodChannel _carPlayChannel =
@@ -163,7 +164,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   Future<void> _init() async {
-    DiagLog.log('--- avvio handler (build rete v13) ---');
+    DiagLog.log('--- avvio handler (build rete v13d) ---');
 
     _attachPlayerListeners();
 
@@ -459,6 +460,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       await _setSourceRetrying(url, gen);
       if (gen != _loadGen) return;
       DiagLog.log('load ok');
+      _lastLoadOkAt = DateTime.now();
       if (startDelay > Duration.zero) {
         // Attesa iniziale: il buffer sale di altri secondi prima di suonare.
         DiagLog.log('attesa iniziale di ${startDelay.inSeconds} s per il buffer');
@@ -1204,6 +1206,15 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     // vicenda e fanno scattare il backup.
     if (_loadInFlight) {
       DiagLog.log('play() ignorato: caricamento gia\' in corso');
+      return;
+    }
+    // Stesso caso a caricamento appena concluso (auto che fa partire la radio e,
+    // un secondo dopo, la scena CarPlay che chiede play): il suono sta gia'
+    // partendo, un secondo caricamento lo farebbe singhiozzare.
+    if (_player.playing &&
+        !_usingBackup &&
+        DateTime.now().difference(_lastLoadOkAt) < const Duration(seconds: 5)) {
+      DiagLog.log('play() ignorato: sta gia\' partendo');
       return;
     }
     // Un play manuale riparte sempre dal LIVE con una connessione fresca,
