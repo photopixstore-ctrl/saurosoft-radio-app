@@ -118,6 +118,8 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   DateTime? _interruptedAt;
   bool _loadInFlight = false;
   DateTime _lastLoadOkAt = DateTime.fromMillisecondsSinceEpoch(0);
+  // Da quando la sonda sul flusso fallisce MENTRE la rete risponde (radio caduta?).
+  DateTime? _radioDownSince;
   bool _sessionStarted = false;
   static final bool _isIos = Platform.isIOS;
   static const MethodChannel _carPlayChannel =
@@ -164,7 +166,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   Future<void> _init() async {
-    DiagLog.log('--- avvio handler (build rete v13e) ---');
+    DiagLog.log('--- avvio handler (build rete v13f) ---');
 
     _attachPlayerListeners();
 
@@ -855,13 +857,26 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
               final referenceUp = stalled ? await _referenceIsUp() : false;
               if (!_wasPlayingBeforeError || _loadInFlight || _usingBackup) return;
               if (referenceUp) {
-                _networkWasDown = false;
-                _switchToBackupNow();
+                // Subito dopo un taglio i primi collegamenti nuovi possono fallire
+                // 1-2 s anche con la rete tornata (log Android 9/10: taglio da 13 s,
+                // passaggio al backup inutile con 16 s di buffer buono). Si passa al
+                // file di riserva solo se la radio resta irraggiungibile per almeno 4 s.
+                _radioDownSince ??= DateTime.now();
+                final since = _radioDownSince!;
+                if (DateTime.now().difference(since) >= const Duration(seconds: 4)) {
+                  _radioDownSince = null;
+                  _networkWasDown = false;
+                  _switchToBackupNow();
+                } else {
+                  _networkWasDown = true; // continua a controllare ogni secondo
+                }
               } else {
+                _radioDownSince = null;
                 _networkWasDown = true;
               }
               return;
             }
+            _radioDownSince = null;
             if (_networkWasDown) {
               // Rete tornata dopo un'interruzione: se il vecchio flusso
               // riprende da solo (pause brevissime) non si tocca niente;
