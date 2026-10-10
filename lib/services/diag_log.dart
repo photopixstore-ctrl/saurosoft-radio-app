@@ -1,11 +1,14 @@
 import 'dart:io';
 
 /// Log diagnostico persistente (file nella cartella temporanea dell'app,
-/// ultime ~200 KB) consultabile e condivisibile dalla finestra
+/// ultimi 5 giorni: le righe piu' vecchie si cancellano da sole; come
+/// sicurezza il file non supera 10 MB) consultabile e condivisibile dalla finestra
 /// "Informazioni sviluppatore". Serve a capire dai dati reali cosa fa il
 /// player quando lo streaming non riparte, invece di indovinare.
 class DiagLog {
-  static const int _maxBytes = 200 * 1024;
+  static const int _maxBytes = 10 * 1024 * 1024;
+  static const Duration _retention = Duration(days: 5);
+  static DateTime _lastPrune = DateTime.fromMillisecondsSinceEpoch(0);
   static const int _maxDumpLines = 700;
   static final List<String> _memory = [];
   static File? _file;
@@ -20,6 +23,12 @@ class DiagLog {
     if (_memory.length > 500) _memory.removeAt(0);
     try {
       final file = _logFile();
+      final now = DateTime.now();
+      // Cancella le righe piu' vecchie di 5 giorni: a ogni avvio e poi ogni 6 ore.
+      if (file.existsSync() && now.difference(_lastPrune) > const Duration(hours: 6)) {
+        _lastPrune = now;
+        _pruneOld(file, now);
+      }
       if (file.existsSync() && file.lengthSync() > _maxBytes) {
         final lines = file.readAsLinesSync();
         file.writeAsStringSync('${lines.sublist(lines.length ~/ 2).join('\n')}\n');
@@ -27,6 +36,22 @@ class DiagLog {
       file.writeAsStringSync('$line\n', mode: FileMode.append);
     } catch (_) {
       // Il log non deve mai poter rompere la riproduzione.
+    }
+  }
+
+  static void _pruneOld(File file, DateTime now) {
+    // Ogni riga inizia con l'ora in formato ISO (aaaa-mm-ggThh:mm:ss...), quindi
+    // il confronto tra testi equivale al confronto tra date.
+    final cutoff = now.subtract(_retention).toIso8601String();
+    final lines = file.readAsLinesSync();
+    var first = 0;
+    while (first < lines.length && lines[first].compareTo(cutoff) < 0) {
+      first++;
+    }
+    if (first > 0) {
+      file.writeAsStringSync(
+        first >= lines.length ? '' : '${lines.sublist(first).join('\n')}\n',
+      );
     }
   }
 
