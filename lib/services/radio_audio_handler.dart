@@ -118,6 +118,19 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   DateTime? _interruptedAt;
   bool _loadInFlight = false;
   DateTime _lastLoadOkAt = DateTime.fromMillisecondsSinceEpoch(0);
+  // Cambio di flusso solo quando nel buffer restano meno di questi secondi: con
+  // il segnale debole i blocchi di 10-15 s spesso ripartono da soli, e un cambio
+  // fatto troppo presto produce uno scatto inutile (log 12/10 ore 10:08). 8 s
+  // bastano al nuovo flusso per collegarsi anche nei casi lenti (visti 3,8 e 6,3 s).
+  static const double _swapAtAheadSec = 8.0;
+  // Una pausa breve (avviso vocale, notifica) riprende dal buffer senza saltare
+  // al vivo: fino a questa durata (s) il ritardo resta sicuro per il server.
+  static const double _resumeFromBufferMinSec = 12.0;
+  // Ritardo aggiunto da pause brevi riprese dal buffer (serve a titoli/copertine).
+  double _pausedExtraSec = 0.0;
+  // Tentativi di riattivazione della sessione audio dopo 'Session activation failed'.
+  int _activationGen = 0;
+  int _activationChain = 0;
   // Da quando la sonda sul flusso fallisce MENTRE la rete risponde (radio caduta?).
   DateTime? _radioDownSince;
   bool _sessionStarted = false;
@@ -166,7 +179,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   Future<void> _init() async {
-    DiagLog.log('--- avvio handler (build rete v13f) ---');
+    DiagLog.log('--- avvio handler (build rete v13g) ---');
 
     _attachPlayerListeners();
 
@@ -280,16 +293,31 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
         // (e titoli/copertine tornano sincronizzati).
         // Si riparte dal buffer finche' il ritardo totale resta entro 30 s
         // (buffer a inizio pausa + durata della pausa); oltre, si riallinea.
-        final limitSec = (30.0 - _aheadAtInterruption - 1.0).clamp(3.0, 30.0);
-        if (at != null &&
-            DateTime.now().difference(at).inMilliseconds / 1000.0 > limitSec) {
+        final pauseSec =
+            at == null ? 0.0 : DateTime.now().difference(at).inMilliseconds / 1000.0;
+        final limitSec =
+            (30.0 - _aheadAtInterruption - 1.0).clamp(_resumeFromBufferMinSec, 30.0);
+        if (at != null && pauseSec > limitSec) {
           DiagLog.log('interruzione lunga: riallineo al live');
           _cancelRecoveryState();
           _usingBackup = false;
           _consecutiveErrors = 0;
           unawaited(_loadAndPlay(_liveUrl()));
         } else {
+          // Pausa breve: si riprende dal buffer, senza scatti. Il ritardo dal vivo
+          // cresce della durata della pausa (titoli e copertine ne tengono conto).
+          _pausedExtraSec += pauseSec;
           unawaited(_fadeTo(1.0, const Duration(seconds: 1)));
+          // Se iOS non riprende da solo (fine interruzione senza 'riprendi'), si rilancia.
+          Future<void>.delayed(const Duration(milliseconds: 500), () {
+            if (_wasPlayingBeforeError &&
+                !_waitingForCarPlay &&
+                !_interrupted &&
+                !_player.playing) {
+              DiagLog.log('ripresa dal buffer: rilancio play()');
+              _startPlayer();
+            }
+          });
         }
       }
     });
@@ -457,6 +485,8 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     _lastBufferedPos = Duration.zero;
     _bufferGrewAt = DateTime.now();
     _publishState();
+    _pausedExtraSec = 0.0;
+    _activationChain = 0;
     DiagLog.log('load start -> $url');
     try {
       await _setSourceRetrying(url, gen);
@@ -579,6 +609,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       _volume = 1.0;
       _speed = 1.0;
       _growthLog.clear();
+      _pausedExtraSec = 0.0;
       final now = DateTime.now();
       _playedSeconds = 0;
       _activeSince = null;
@@ -650,7 +681,41 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   void _startPlayer() {
     unawaited(_player.play().catchError((Object e) {
       DiagLog.log('player.play() errore: ${e.runtimeType} $e');
+      if (e.toString().contains('Session activation failed')) {
+        unawaited(_retryActivation());
+      }
     }));
+  }
+
+  /// Dopo un'interruzione (chiamata, Siri, navigatore) iOS puo' rifiutare per
+  /// qualche secondo la riattivazione dell'audio ('Session activation failed'):
+  /// il 12/10 la radio e' rimasta muta 40 minuti. Si riprova a intervalli
+  /// crescenti; riuscita la riattivazione si azzera lo stato 'in riproduzione'
+  /// rimasto dopo l'errore e si rilancia il play.
+  Future<void> _retryActivation() async {
+    if (++_activationChain > 5) {
+      DiagLog.log('sessione audio: troppi tentativi, mi fermo');
+      return;
+    }
+    final gen = ++_activationGen;
+    const waits = [1, 1, 2, 2, 3, 3, 5, 5];
+    for (final seconds in waits) {
+      await Future<void>.delayed(Duration(seconds: seconds));
+      if (gen != _activationGen || !_wasPlayingBeforeError || _waitingForCarPlay) return;
+      try {
+        final session = await AudioSession.instance;
+        if (await session.setActive(true)) {
+          if (gen != _activationGen || !_wasPlayingBeforeError) return;
+          DiagLog.log('sessione audio riattivata: rilancio play()');
+          await _player.pause();
+          _startPlayer();
+          return;
+        }
+      } catch (e) {
+        DiagLog.log('riattivazione sessione audio fallita: $e');
+      }
+    }
+    DiagLog.log('sessione audio non riattivata dopo i tentativi');
   }
 
   /// Qualsiasi segnale di stream interrotto passa da qui. Piu' segnali
@@ -826,7 +891,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
         // ~15 s = stesso ritardo dal live): riconnettersi PRIMA che il buffer
         // finisca, ma solo se la rete risponde (se e' giu', ricaricare
         // fermerebbe l'audio residuo senza ottenere niente).
-        final nearEnd = ahead <= 3.5;
+        final nearEnd = ahead <= _swapAtAheadSec;
         if (stagnant > const Duration(seconds: 3) &&
             !_probing &&
             (_networkWasDown ||
@@ -882,6 +947,14 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
               // riprende da solo (pause brevissime) non si tocca niente;
               // se dopo 1 s non e' cresciuto, ci si riconnette subito.
               _networkWasDown = false;
+              if (aheadNow > _swapAtAheadSec) {
+                // Rete tornata e buffer ancora abbondante: il flusso puo' ripartire
+                // da solo; se non lo fa si cambia quando restano meno di 8 s.
+                DiagLog.log(
+                  'rete tornata, buffer ancora ${aheadNow.toStringAsFixed(1)} s: aspetto',
+                );
+                return;
+              }
               final snapshot = _player.bufferedPosition;
               // Con poco buffer rimasto non c'e' tempo da perdere: si
               // riconnette subito (log reale: tagli da ~12 s arrivano qui con
@@ -898,8 +971,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
                   delay: Duration.zero,
                 );
               });
-            } else if (aheadNow <= 3.5 ||
-                DateTime.now().difference(_bufferGrewAt) >= const Duration(seconds: 8)) {
+            } else if (aheadNow <= _swapAtAheadSec) {
               // Con il cambio senza stacco riconnettersi presto non costa
               // niente: il vecchio audio continua fino al passaggio.
               _handleStreamError(
@@ -1001,7 +1073,9 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     _metaTimer = null;
     final listening =
         _player.playing && _player.processingState == ProcessingState.ready;
-    final delaySec = listening ? _bufferAheadSeconds() + _metadataOffsetSec : 0.0;
+    final delaySec = listening
+        ? _bufferAheadSeconds() + _pausedExtraSec + _metadataOffsetSec
+        : 0.0;
     void apply() {
       _baseItem = item;
       _pushMediaItem();
