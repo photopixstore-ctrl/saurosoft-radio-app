@@ -137,6 +137,10 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   static final bool _isIos = Platform.isIOS;
   static const MethodChannel _carPlayChannel =
       MethodChannel('it.photopix.saurosoft/carplay');
+  // Widget "In onda" (solo iOS, ios_widget/): titolo, artista e copertina del brano ascoltato.
+  static const MethodChannel _widgetChannel =
+      MethodChannel('it.photopix.saurosoft/widget');
+  String _lastWidgetKey = '';
   DateTime? _carPlayLostAt;
   int _loadGen = 0;
   int _consecutiveErrors = 0;
@@ -1100,6 +1104,24 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     mediaItem.add(
       alreadyShown ? _baseItem : _baseItem.copyWith(album: RadioConfig.stationName),
     );
+    _pushWidget();
+  }
+
+  /// Comunica al widget iOS il brano che si sta ascoltando (stesso istante di telefono e
+  /// CarPlay, quindi con il ritardo del buffer). Si invia solo se qualcosa e' cambiato.
+  void _pushWidget() {
+    if (!_isIos) return;
+    final item = _baseItem;
+    final cover = (item.extras?['cover'] as String?) ?? item.artUri?.toString() ?? '';
+    final artist = item.artist ?? '';
+    final key = '${item.title}|$artist|$cover';
+    if (key == _lastWidgetKey) return;
+    _lastWidgetKey = key;
+    unawaited(_widgetChannel.invokeMethod<void>('update', <String, String>{
+      'title': item.title,
+      'artist': artist,
+      'cover': cover,
+    }).catchError((Object _) {}));
   }
 
   /// Tacche del buffer per il tasto della schermata "In riproduzione" di

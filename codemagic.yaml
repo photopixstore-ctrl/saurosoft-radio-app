@@ -48,6 +48,61 @@ workflows:
         # a mano su App Store Connect quando sei pronto)
         submit_to_app_store: false
 
+  # Variante con il widget "In onda" (ramo widget-radio). Rispetto a ios-workflow:
+  #  - firma MANUALE con due profili App Store (app + estensione widget), perche' i due
+  #    bundle id e l'App Group non si gestiscono con la firma automatica a un solo bundle;
+  #  - lo step "Aggiungi il widget iOS" crea il target RadioWidgetsExtension nel progetto.
+  # I nomi dei profili e del certificato qui sotto devono combaciare ESATTAMENTE con quelli
+  # scelti in Codemagic > Team > Code signing identities (vedi Progetto_widget_radio_iPhone.md).
+  ios-widget-workflow:
+    name: Saurosoft Radio - iOS con widget (TestFlight)
+    max_build_duration: 60
+    instance_type: mac_mini_m2
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+      ios_signing:
+        provisioning_profiles:
+          - saurosoft_radio_app_store
+          - saurosoft_radio_widget_app_store
+        certificates:
+          - Saurosoft Radio Distribution
+      vars:
+        APP_STORE_APPLE_ID: 6797857543
+    integrations:
+      app_store_connect: codemagic_app_store_connect
+    scripts:
+      - name: Aggiungi il widget iOS (target RadioWidgetsExtension + App Group)
+        script: |
+          set -e
+          # La gemma xcodeproj arriva con CocoaPods; se manca la installo.
+          ruby -e "require 'xcodeproj'" 2>/dev/null || gem install xcodeproj --no-document --user-install
+          ruby scripts/add_radio_widget_target.rb
+          echo "--- target nel progetto ---"
+          grep -n "RadioWidgetsExtension" ios/Runner.xcodeproj/project.pbxproj | head -20 || true
+      - name: Scarica le dipendenze Flutter
+        script: flutter packages pub get
+      - name: Installa i pod di CocoaPods
+        script: |
+          find . -name "Podfile" -execdir pod install \;
+      - name: Collega automaticamente certificati e profili
+        script: xcode-project use-profiles
+      - name: Compila il pacchetto .ipa
+        script: |
+          BUILD_NUMBER=$(($(app-store-connect get-latest-testflight-build-number "$APP_STORE_APPLE_ID") + 1))
+          flutter build ipa --release \
+            --build-name=1.0.0 \
+            --build-number=$BUILD_NUMBER \
+            --export-options-plist=/Users/builder/export_options.plist
+    artifacts:
+      - build/ios/ipa/*.ipa
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: true
+        submit_to_app_store: false
+
   simulator-workflow:
     name: Saurosoft Radio - iOS Simulatore (per testare senza Apple Developer)
     max_build_duration: 30
