@@ -126,37 +126,66 @@ struct RadioCover: View {
 struct RadioWidgetView: View {
     let entry: RadioEntry
 
+    private static let pad: CGFloat = 10
+    private static let gap: CGFloat = 4
+    private static let headerH: CGFloat = 15
+    private static let titleLineH: CGFloat = 19
+    private static let artistH: CGFloat = 16
+
+    /// La copertina prende tutto lo spazio che resta sotto "Saurosoft Radio" e sopra titolo e
+    /// artista: con un titolo di una riga e' piu' grande, con due righe si restringe (mai sotto
+    /// 64 pt, e mai oltre il 62% della larghezza). Misure calibrate sul widget in CarPlay (~158 pt).
+    private func coverSide(_ size: CGSize) -> CGFloat {
+        let innerW = size.width - 2 * RadioWidgetView.pad
+        let innerH = size.height - 2 * RadioWidgetView.pad
+        let charsPerLine = max(Int(innerW / 8.6), 8)
+        let titleLines: CGFloat = entry.title.count > charsPerLine ? 2 : 1
+        let text = RadioWidgetView.headerH + 3 * RadioWidgetView.gap
+            + titleLines * RadioWidgetView.titleLineH + RadioWidgetView.artistH
+        return min(max(innerH - text, 64), min(innerW * 0.62, 100))
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(alignment: .top, spacing: 8) {
-                RadioCover(image: entry.cover, size: 64)
-                VStack(alignment: .leading, spacing: 3) {
-                    Image(systemName: "dot.radiowaves.left.and.right")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundColor(RadioColors.accent)
-                    Text("IN ONDA")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundColor(RadioColors.dim)
-                        .lineLimit(1)
+        GeometryReader { geo in
+            let side = coverSide(geo.size)
+            VStack(alignment: .leading, spacing: RadioWidgetView.gap) {
+                Text("Saurosoft Radio")
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .foregroundColor(RadioColors.text)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                    .frame(maxWidth: .infinity, minHeight: RadioWidgetView.headerH, alignment: .leading)
+                HStack(alignment: .top, spacing: 8) {
+                    RadioCover(image: entry.cover, size: side)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Image(systemName: "dot.radiowaves.left.and.right")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundColor(RadioColors.accent)
+                        Text("IN ONDA")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(RadioColors.dim)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                Text(entry.title)
+                    .font(.system(size: 16, weight: .bold, design: .rounded))
+                    .foregroundColor(RadioColors.text)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.7)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text(entry.artist)
+                    .font(.system(size: 13, weight: .regular))
+                    .foregroundColor(RadioColors.dim)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Spacer(minLength: 0)
             }
-            Text(entry.title)
-                .font(.system(size: 16, weight: .bold, design: .rounded))
-                .foregroundColor(RadioColors.text)
-                .lineLimit(2)
-                .minimumScaleFactor(0.7)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Text(entry.artist)
-                .font(.system(size: 13, weight: .regular))
-                .foregroundColor(RadioColors.dim)
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Spacer(minLength: 0)
+            .padding(RadioWidgetView.pad)
+            .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .padding(10)
         .containerBackground(for: .widget) { RadioColors.background }
     }
 }

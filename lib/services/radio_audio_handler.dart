@@ -125,7 +125,10 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   static const double _swapAtAheadSec = 8.0;
   // Una pausa breve (avviso vocale, notifica) riprende dal buffer senza saltare
   // al vivo: fino a questa durata (s) il ritardo resta sicuro per il server.
-  static const double _resumeFromBufferMinSec = 12.0;
+  // Tornato a 3 s (era 12 nella v13g): nel log reale del 13/10 (13:50) una pausa di
+  // ~10 s ripresa dal buffer ha lasciato solo 8,8 s di buffer (prima ~28 s), cioe' iOS
+  // aveva scartato parte dell'audio. Sopra i 3 s si rientra al live con un ricaricamento.
+  static const double _resumeFromBufferMinSec = 3.0;
   // Ritardo aggiunto da pause brevi riprese dal buffer (serve a titoli/copertine).
   double _pausedExtraSec = 0.0;
   // Tentativi di riattivazione della sessione audio dopo 'Session activation failed'.
@@ -183,7 +186,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   Future<void> _init() async {
-    DiagLog.log('--- avvio handler (build rete v13g) ---');
+    DiagLog.log('--- avvio handler (build rete v13h widget) ---');
 
     _attachPlayerListeners();
 
@@ -738,6 +741,20 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   Future<void> _recover() async {
     _retryTimer = null;
     if (!_wasPlayingBeforeError || _waitingForCarPlay || _swapping) return;
+    // Il flusso suona e ha ancora buffer abbondante (es. un caricamento andato in
+    // timeout ma poi riuscito, log reale 13/10 ore 13:27: cambio avviato con 22 s di
+    // buffer e poi annullato): niente da recuperare. Se il buffer scende davvero,
+    // il controllo periodico richiama il recupero sotto la soglia.
+    if (!_usingBackup &&
+        _player.playing &&
+        _player.processingState == ProcessingState.ready &&
+        _bufferAheadSeconds() > _swapAtAheadSec) {
+      DiagLog.log(
+        'recupero annullato: il flusso suona e ha ${_bufferAheadSeconds().toStringAsFixed(1)} s di buffer',
+      );
+      _consecutiveErrors = 0;
+      return;
+    }
     // Live ancora in riproduzione con audio nel buffer: nuovo flusso preparato
     // in parallelo, senza interrompere quello che sta suonando.
     if (!_usingBackup &&
