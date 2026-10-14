@@ -123,6 +123,8 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   // fatto troppo presto produce uno scatto inutile (log 12/10 ore 10:08). 8 s
   // bastano al nuovo flusso per collegarsi anche nei casi lenti (visti 3,8 e 6,3 s).
   static const double _swapAtAheadSec = 8.0;
+  // Buffer vero al quale l'indicatore e' pieno (lo zero dell'indicatore e' _swapAtAheadSec).
+  static const double _bufferBarFullSec = 28.0;
   // Una pausa breve (avviso vocale, notifica) riprende dal buffer senza saltare
   // al vivo: fino a questa durata (s) il ritardo resta sicuro per il server.
   // Tornato a 3 s (era 12 nella v13g): nel log reale del 13/10 (13:50) una pausa di
@@ -186,7 +188,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   Future<void> _init() async {
-    DiagLog.log('--- avvio handler (build rete v13h widget) ---');
+    DiagLog.log('--- avvio handler (build rete v13i widget) ---');
 
     _attachPlayerListeners();
 
@@ -1298,10 +1300,16 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
             _player.processingState == ProcessingState.buffering);
     if (!active) _aheadHistory.clear();
     final ahead = active ? _calmAhead(_bufferAheadSeconds()) : 0.0;
-    customEvent.add({'bufferAhead': ahead});
+    // Scala dell'indicatore (richiesta di Domenico 14/10): lo ZERO e' il momento in cui l'app
+    // interviene (buffer vero = _swapAtAheadSec, 8 s), il PIENO e' a _bufferBarFullSec (28 s).
+    // Gli ultimi 8 s sono la riserva dell'app e non contano come buffer visibile.
+    final level = ((ahead - _swapAtAheadSec) / (_bufferBarFullSec - _swapAtAheadSec))
+        .clamp(0.0, 1.0)
+        .toDouble();
+    customEvent.add({'bufferAhead': ahead, 'bufferLevel': level});
     var bars = -1;
     if (active) {
-      bars = ahead <= 0.5 ? 0 : (ahead / 5).ceil().clamp(1, 5).toInt();
+      bars = ahead <= _swapAtAheadSec ? 0 : (level * 5).ceil().clamp(1, 5).toInt();
     }
     final now = DateTime.now();
     // Durante un'interruzione la barra in auto deve seguire il calo reale:

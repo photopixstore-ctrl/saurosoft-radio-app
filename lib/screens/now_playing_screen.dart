@@ -369,8 +369,9 @@ class _BufferBars extends StatelessWidget {
 
   const _BufferBars({required this.audioHandler});
 
-  // Barra piena da 25 s in su: il buffer reale oscilla (arriva a blocchi) tra ~24 e 30 s.
-  static const double _fullSeconds = 25;
+  // Scala (14/10): zero = 8 s di buffer vero (l'app cambia flusso), pieno = 28 s. Il livello
+  // (0-1) lo calcola il RadioAudioHandler (customEvent 'bufferLevel'), identico alle tacche di CarPlay.
+  static const double _zeroSeconds = 8;
   static const double _barWidth = 84;
 
   @override
@@ -381,9 +382,12 @@ class _BufferBars extends StatelessWidget {
         final data = snapshot.data;
         final ahead =
             (data is Map && data['bufferAhead'] is num) ? (data['bufferAhead'] as num).toDouble() : 0.0;
-        final level = (ahead / _fullSeconds).clamp(0.0, 1.0);
+        final level = (data is Map && data['bufferLevel'] is num)
+            ? (data['bufferLevel'] as num).toDouble().clamp(0.0, 1.0)
+            : ((ahead - _zeroSeconds) / (28 - _zeroSeconds)).clamp(0.0, 1.0);
+        final spare = (ahead - _zeroSeconds) < 0 ? 0.0 : ahead - _zeroSeconds;
         return Tooltip(
-          message: 'Buffer: ${ahead.toStringAsFixed(0)} s',
+          message: 'Buffer: ${spare.toStringAsFixed(0)} s (oltre gli 8 s di riserva)',
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
