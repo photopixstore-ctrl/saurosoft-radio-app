@@ -283,7 +283,9 @@ struct RadioWidgetView: View {
             VStack(alignment: .leading, spacing: RadioWidgetView.gap) {
                 HStack(alignment: .top, spacing: RadioWidgetView.colGap) {
                     RadioCover(image: entry.cover, size: side)
-                    VStack(alignment: .leading, spacing: 4) {
+                    // Colonna a destra della copertina, alta quanto la copertina: logo e "IN ONDA"
+                    // in alto, calendario + anno ancorati al bordo inferiore della copertina.
+                    VStack(alignment: .leading, spacing: 0) {
                         // Logo del dinosauro, grande il doppio di prima.
                         if let logo = RadioLogo.image {
                             Image(uiImage: logo)
@@ -297,30 +299,32 @@ struct RadioWidgetView: View {
                                 .resizable()
                                 .scaledToFit()
                                 .foregroundColor(RadioColors.accent)
-                                .frame(width: 13, height: 13)
+                                .frame(width: 14, height: 14)
                             Text("IN ONDA")
-                                .font(.system(size: 9, weight: .bold))
+                                .font(.system(size: 11, weight: .bold))
                                 .foregroundColor(RadioColors.dim)
                                 .lineLimit(1)
-                                .minimumScaleFactor(0.7)
+                                .minimumScaleFactor(0.6)
                         }
-                        // Anno del brano: calendario + (anno). Senza anno la riga non compare.
+                        .padding(.top, 3)
+                        Spacer(minLength: 0)
+                        // Anno del brano: calendario + anno (senza parentesi). Senza anno la riga non compare.
                         if let year = entry.year {
                             HStack(spacing: 3) {
                                 Image(systemName: "calendar")
                                     .resizable()
                                     .scaledToFit()
                                     .foregroundColor(RadioColors.calendar)
-                                    .frame(width: 12, height: 12)
-                                Text("(\(year))")
-                                    .font(.system(size: 11, weight: .bold))
+                                    .frame(width: 14, height: 14)
+                                Text(year)
+                                    .font(.system(size: 13, weight: .bold))
                                     .foregroundColor(RadioColors.dim)
                                     .lineLimit(1)
                                     .minimumScaleFactor(0.6)
                             }
                         }
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(maxWidth: .infinity, minHeight: side, maxHeight: side, alignment: .topLeading)
                 }
                 // Titolo: sempre due righe di spazio; piu' e' lungo piu' si rimpicciolisce (mai tagliato).
                 Text(entry.title)
