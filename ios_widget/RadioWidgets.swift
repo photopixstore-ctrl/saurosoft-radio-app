@@ -45,6 +45,7 @@ enum RadioColors {
     static let accent = Color(hex: 0xF5A623)
     static let text = Color(hex: 0xF4F6F8)
     static let dim = Color(hex: 0xB3BDCA)
+    static let calendar = Color(hex: 0x4FC3F7)
 }
 
 struct RadioEntry: TimelineEntry {
@@ -52,6 +53,21 @@ struct RadioEntry: TimelineEntry {
     let title: String
     let artist: String
     let cover: UIImage?
+
+    /// L'app manda l'artista come "Nome (1991)": nome e anno si separano qui, nel widget.
+    /// L'anno e' valido solo se sono 4 cifre tra parentesi in fondo al testo.
+    var artistName: String {
+        guard let r = artist.range(of: #"\s*\((\d{4})\)\s*$"#, options: .regularExpression) else { return artist }
+        let name = String(artist[artist.startIndex..<r.lowerBound]).trimmingCharacters(in: .whitespaces)
+        return name.isEmpty ? artist : name
+    }
+
+    var year: String? {
+        guard let r = artist.range(of: #"\((\d{4})\)\s*$"#, options: .regularExpression) else { return nil }
+        let digits = artist[r].filter { $0.isNumber }
+        guard !artistName.isEmpty, artistName != artist else { return nil }
+        return String(digits)
+    }
 
     static let sample = RadioEntry(date: Date(), title: "Titolo del brano", artist: "Artista (1986)", cover: nil)
 
@@ -240,13 +256,14 @@ struct RadioWidgetView: View {
     private static let gap: CGFloat = 3
     private static let colGap: CGFloat = 8
     private static let titleSize: CGFloat = 13
-    private static let artistSize: CGFloat = 11
+    private static let artistSize: CGFloat = 12
     /// Spazio fisso di DUE righe di titolo (13 pt): se il titolo ne occupa una sola, la seconda
     /// resta vuota, cosi' l'artista sta sempre nella riga piu' bassa.
     private static let titleBoxH: CGFloat = 32
     private static let artistH: CGFloat = 14
     /// Larghezza di onde e logo (stessa misura); colonna a destra della copertina = 2 icone + spazio.
     private static let iconW: CGFloat = 20
+    private static let logoSize: CGFloat = 40
     private static let iconGap: CGFloat = 5
 
     /// La copertina prende tutto lo spazio che resta sopra le due righe del titolo e la riga
@@ -266,26 +283,42 @@ struct RadioWidgetView: View {
             VStack(alignment: .leading, spacing: RadioWidgetView.gap) {
                 HStack(alignment: .top, spacing: RadioWidgetView.colGap) {
                     RadioCover(image: entry.cover, size: side)
-                    VStack(alignment: .leading, spacing: 3) {
-                        HStack(spacing: RadioWidgetView.iconGap) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        // Logo del dinosauro, grande il doppio di prima.
+                        if let logo = RadioLogo.image {
+                            Image(uiImage: logo)
+                                .resizable()
+                                .scaledToFill()
+                                .frame(width: RadioWidgetView.logoSize, height: RadioWidgetView.logoSize)
+                                .clipShape(RoundedRectangle(cornerRadius: 9))
+                        }
+                        VStack(alignment: .leading, spacing: 1) {
                             Image(systemName: "dot.radiowaves.left.and.right")
                                 .resizable()
                                 .scaledToFit()
                                 .foregroundColor(RadioColors.accent)
-                                .frame(width: RadioWidgetView.iconW, height: RadioWidgetView.iconW)
-                            if let logo = RadioLogo.image {
-                                Image(uiImage: logo)
+                                .frame(width: 13, height: 13)
+                            Text("IN ONDA")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundColor(RadioColors.dim)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.7)
+                        }
+                        // Anno del brano: calendario + (anno). Senza anno la riga non compare.
+                        if let year = entry.year {
+                            HStack(spacing: 3) {
+                                Image(systemName: "calendar")
                                     .resizable()
-                                    .scaledToFill()
-                                    .frame(width: RadioWidgetView.iconW, height: RadioWidgetView.iconW)
-                                    .clipShape(RoundedRectangle(cornerRadius: 5))
+                                    .scaledToFit()
+                                    .foregroundColor(RadioColors.calendar)
+                                    .frame(width: 12, height: 12)
+                                Text("(\(year))")
+                                    .font(.system(size: 11, weight: .bold))
+                                    .foregroundColor(RadioColors.dim)
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.6)
                             }
                         }
-                        Text("IN ONDA")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundColor(RadioColors.dim)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.7)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -299,8 +332,8 @@ struct RadioWidgetView: View {
                     .frame(maxWidth: .infinity, minHeight: RadioWidgetView.titleBoxH,
                            maxHeight: RadioWidgetView.titleBoxH, alignment: .topLeading)
                 Spacer(minLength: 0)
-                // Artista (e anno): una riga sola, sempre in fondo; se e' lungo si rimpicciolisce.
-                Text(entry.artist)
+                // Artista (senza anno, che sta sotto "IN ONDA"): una riga sola, sempre in fondo; se e' lungo si rimpicciolisce.
+                Text(entry.artistName)
                     .font(.system(size: RadioWidgetView.artistSize, weight: .regular))
                     .foregroundColor(RadioColors.dim)
                     .lineLimit(1)
