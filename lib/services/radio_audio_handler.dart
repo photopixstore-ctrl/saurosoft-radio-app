@@ -211,7 +211,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   Future<void> _init() async {
-    DiagLog.log('--- avvio handler (build rete v13o brano udito) ---');
+    DiagLog.log('--- avvio handler (build rete v13p brano udito) ---');
 
     _attachPlayerListeners();
 
@@ -1100,12 +1100,18 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     if (np == null) return;
     final last = _songs.isEmpty ? null : _songs.last;
     if (last != null && last.np.title == np.title && last.np.artist == np.artist) {
-      // Stesso brano: si aggiornano solo i dati (la canzone successiva puo'
-      // cambiare); l'inizio del brano resta quello rilevato la prima volta.
+      // Il ripiego (current.php) non conosce la canzone successiva: si
+      // tengono i dati del server radio (altrimenti "Poi:" lampeggia).
+      if (np.fromFallback) return;
+      // Stesso brano: si aggiornano i dati (la canzone successiva puo'
+      // cambiare; inizio e durata possono arrivare solo al secondo controllo).
       final nextChanged = last.np.nextTitle != np.nextTitle ||
           last.np.nextArtist != np.nextArtist;
+      final gainedProgress =
+          last.np.songStartMs == null && np.songStartMs != null;
       last.np = np;
-      if (nextChanged && identical(last, _shownSong)) {
+      if (gainedProgress) last.startMs = np.songStartMs!;
+      if ((nextChanged || gainedProgress) && identical(last, _shownSong)) {
         _showSong(last);
       }
     } else {
@@ -1631,7 +1637,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
 /// visto per la prima volta.
 class _SongEntry {
   NowPlaying np;
-  final int startMs;
+  int startMs;
 
   _SongEntry(this.np, this.startMs);
 }

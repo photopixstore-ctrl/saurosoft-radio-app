@@ -21,6 +21,10 @@ class NowPlaying {
   final String nextYear;
   final String nextCover;
 
+  /// True se il dato viene dal ripiego (current.php), che non conosce la
+  /// canzone successiva.
+  final bool fromFallback;
+
   const NowPlaying({
     required this.title,
     required this.artist,
@@ -32,6 +36,7 @@ class NowPlaying {
     this.nextArtist = '',
     this.nextYear = '',
     this.nextCover = '',
+    this.fromFallback = false,
   });
 
   factory NowPlaying.fallback() => NowPlaying(
@@ -43,7 +48,8 @@ class NowPlaying {
 
   /// [serverNowSec]: ora del server (header HTTP Date) per allineare l'inizio
   /// del brano all'orologio del telefono, anche se non sono sincronizzati.
-  factory NowPlaying.fromJson(Map<String, dynamic> json, {int? serverNowSec}) {
+  factory NowPlaying.fromJson(Map<String, dynamic> json,
+      {int? serverNowSec, bool fromFallback = false}) {
     final cover = (json['cover'] ?? '').toString();
     final duration = json['duration'] is num ? (json['duration'] as num).toInt() : null;
     final startedAt = json['started_at'] is num ? (json['started_at'] as num).toInt() : null;
@@ -51,8 +57,10 @@ class NowPlaying {
     int? songStartMs;
     final now = serverNowSec ?? updated;
     if (duration != null && duration > 0 && startedAt != null && now != null) {
-      final elapsedSec = now - startedAt;
-      if (elapsedSec >= 0 && elapsedSec <= duration + 30) {
+      // Pochi secondi di scarto tra orologio del server e started_at sono
+      // normali all'inizio del brano: si tratta come "appena iniziato".
+      final elapsedSec = now - startedAt < 0 ? 0 : now - startedAt;
+      if (now - startedAt >= -5 && elapsedSec <= duration + 30) {
         songStartMs = DateTime.now().millisecondsSinceEpoch - elapsedSec * 1000;
       }
     }
@@ -70,6 +78,7 @@ class NowPlaying {
       nextArtist: (json['next_artist'] ?? '').toString().trim(),
       nextYear: (json['next_year'] ?? '').toString().trim(),
       nextCover: (json['next_cover'] ?? '').toString().trim(),
+      fromFallback: fromFallback,
     );
   }
 

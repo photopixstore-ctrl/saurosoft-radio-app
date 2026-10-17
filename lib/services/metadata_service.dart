@@ -14,10 +14,10 @@ class MetadataService {
     // si ripiega su current.php del sito (senza "Poi:").
     final primary = await _fetch(RadioConfig.nowPlayingUrl);
     if (primary != null) return primary;
-    return _fetch(RadioConfig.metadataUrl);
+    return _fetch(RadioConfig.metadataUrl, fallback: true);
   }
 
-  Future<NowPlaying?> _fetch(String baseUrl) async {
+  Future<NowPlaying?> _fetch(String baseUrl, {bool fallback = false}) async {
     final timestamp = DateTime.now().millisecondsSinceEpoch;
     final uri = Uri.parse('$baseUrl?t=$timestamp');
 
@@ -32,7 +32,8 @@ class MetadataService {
             serverNowSec = HttpDate.parse(date).millisecondsSinceEpoch ~/ 1000;
           } catch (_) {}
         }
-        return NowPlaying.fromJson(data, serverNowSec: serverNowSec);
+        return NowPlaying.fromJson(data,
+            serverNowSec: serverNowSec, fromFallback: fallback);
       }
     } catch (_) {
       // In caso di errore di rete/timeout si mantiene lo stato precedente
