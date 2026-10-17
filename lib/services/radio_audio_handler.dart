@@ -1118,6 +1118,9 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       // (niente effetto disco, scelta di Domenico); il disco e' solo nell'app.
       extras: {
         'cover': nowPlaying.cover,
+        // Canzone successiva: la schermata del telefono mostra "Poi: ...".
+        'nextTitle': nowPlaying.nextTitle,
+        'nextArtist': nowPlaying.nextArtist,
         if (nowPlaying.songStartMs != null) 'songStartMs': nowPlaying.songStartMs,
         if (nowPlaying.durationSec != null) 'songDurationSec': nowPlaying.durationSec,
       },

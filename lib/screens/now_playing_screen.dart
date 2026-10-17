@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io' show Platform;
 import 'package:audio_service/audio_service.dart';
 import 'package:cached_network_image/cached_network_image.dart';
@@ -150,10 +151,33 @@ class NowPlayingScreen extends StatelessWidget {
               textAlign: TextAlign.center,
               style: const TextStyle(color: Colors.white70, fontSize: 16),
             ),
+            if (_nextLine(item) != null) ...[
+              const SizedBox(height: 6),
+              Text(
+                _nextLine(item)!,
+                textAlign: TextAlign.center,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(color: Colors.white60, fontSize: 14),
+              ),
+            ],
+            if (item?.duration != null && item!.duration! > Duration.zero) ...[
+              const SizedBox(height: 14),
+              _SongProgress(audioHandler: audioHandler, duration: item!.duration!),
+            ],
           ],
         );
       },
     );
+  }
+
+  /// "Poi: Titolo - Artista" dalla canzone successiva (campi next_* del server).
+  /// Niente riga se il server non la conosce.
+  String? _nextLine(MediaItem? item) {
+    final title = (item?.extras?['nextTitle'] ?? '').toString();
+    if (title.isEmpty) return null;
+    final artist = (item?.extras?['nextArtist'] ?? '').toString();
+    return artist.isEmpty ? 'Poi: $title' : 'Poi: $title – $artist';
   }
 
   Widget _buildControls() {
@@ -356,6 +380,77 @@ class _VinylArea extends StatelessWidget {
           },
         );
       },
+    );
+  }
+}
+
+/// Barra del tempo del brano (trascorso a sinistra, rimanente a destra): la
+/// posizione la pubblica il RadioAudioHandler (tempo UDITO, allineato al
+/// buffer) e qui si legge ogni mezzo secondo. Non e' spostabile.
+class _SongProgress extends StatefulWidget {
+  final AudioHandler audioHandler;
+  final Duration duration;
+
+  const _SongProgress({required this.audioHandler, required this.duration});
+
+  @override
+  State<_SongProgress> createState() => _SongProgressState();
+}
+
+class _SongProgressState extends State<_SongProgress> {
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer.periodic(const Duration(milliseconds: 500), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  String _fmt(Duration d) {
+    final s = d.inSeconds < 0 ? 0 : d.inSeconds;
+    return '${s ~/ 60}:${(s % 60).toString().padLeft(2, '0')}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final total = widget.duration;
+    var pos = widget.audioHandler.playbackState.value.position;
+    if (pos < Duration.zero) pos = Duration.zero;
+    if (pos > total) pos = total;
+    final frac = total.inMilliseconds == 0
+        ? 0.0
+        : (pos.inMilliseconds / total.inMilliseconds).clamp(0.0, 1.0);
+    const style = TextStyle(color: Colors.white70, fontSize: 13);
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 24),
+      child: Row(
+        children: [
+          SizedBox(width: 44, child: Text(_fmt(pos), style: style)),
+          Expanded(
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(2),
+              child: LinearProgressIndicator(
+                value: frac,
+                minHeight: 4,
+                backgroundColor: Colors.white24,
+                valueColor: const AlwaysStoppedAnimation<Color>(Colors.white),
+              ),
+            ),
+          ),
+          SizedBox(
+            width: 44,
+            child: Text('-${_fmt(total - pos)}', textAlign: TextAlign.right, style: style),
+          ),
+        ],
+      ),
     );
   }
 }
