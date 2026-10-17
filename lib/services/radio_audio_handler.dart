@@ -85,7 +85,6 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
 
   // Flusso dedicato alle app: se non risponde si ripiega su radio.mp3 per qualche minuto.
   DateTime? _appStreamBadUntil;
-  Timer? _metaTimer;
   // Correzione fine del ritardo dei titoli (secondi, anche negativa): da tarare in prova.
   static const double _metadataOffsetSec = 0.0;
 
@@ -152,10 +151,17 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   int _consecutiveErrors = 0;
   int _tickCount = 0;
   DateTime _stateSince = DateTime.now();
-  String _lastArtist = '';
-  String _lastTitle = '';
-  String _lastNextTitle = '';
-  String _lastNextArtist = '';
+  // Brani visti da current.php negli ultimi minuti (dal piu' vecchio al piu'
+  // recente). Il suono arriva con il ritardo del buffer (~30 s): titolo,
+  // copertina, "Poi:" e barra del tempo devono essere quelli del brano che si
+  // SENTE, non quelli della diretta (dopo una pausa o una ricarica, altrimenti
+  // il titolo nuovo compare mentre suona ancora il brano vecchio).
+  final List<_SongEntry> _songs = [];
+  _SongEntry? _shownSong;
+  // Subito dopo un nuovo caricamento si puo' tornare a un brano piu' vecchio
+  // (il suono riparte ~30 s indietro); poi mai (il buffer oscilla con la rete
+  // debole e il titolo non deve ballare).
+  bool _allowSongBack = true;
 
   // Barra di avanzamento del brano (CarPlay, blocco schermo). La radio e' dal
   // vivo ma current.php da' inizio e durata del brano: il tempo mostrato e'
@@ -205,7 +211,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   Future<void> _init() async {
-    DiagLog.log('--- avvio handler (build rete v13m poi+tempo) ---');
+    DiagLog.log('--- avvio handler (build rete v13o brano udito) ---');
 
     _attachPlayerListeners();
 
@@ -514,6 +520,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     _lastBufferedPos = Duration.zero;
     _bufferGrewAt = DateTime.now();
     _songNeedsAnchor = true;
+    _allowSongBack = true;
     _publishState();
     _pausedExtraSec = 0.0;
     _activationChain = 0;
@@ -897,6 +904,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     _tickCount++;
     _publishBuffer();
     _updateSlowdown();
+    _applyHeardSong();
     _maybeReanchorSong();
     if (_tickCount % 10 == 0) {
       DiagLog.log(
@@ -1088,70 +1096,109 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   Future<void> _refreshMetadata() async {
-    final nowPlaying = await _metadataService.fetchNowPlaying();
-    if (nowPlaying == null) return;
-    final sameSong =
-        nowPlaying.artist == _lastArtist && nowPlaying.title == _lastTitle;
-    final sameNext = nowPlaying.nextTitle == _lastNextTitle &&
-        nowPlaying.nextArtist == _lastNextArtist;
-    if (sameSong && sameNext) {
-      return;
+    final np = await _metadataService.fetchNowPlaying();
+    if (np == null) return;
+    final last = _songs.isEmpty ? null : _songs.last;
+    if (last != null && last.np.title == np.title && last.np.artist == np.artist) {
+      // Stesso brano: si aggiornano solo i dati (la canzone successiva puo'
+      // cambiare); l'inizio del brano resta quello rilevato la prima volta.
+      final nextChanged = last.np.nextTitle != np.nextTitle ||
+          last.np.nextArtist != np.nextArtist;
+      last.np = np;
+      if (nextChanged && identical(last, _shownSong)) {
+        _showSong(last);
+      }
+    } else {
+      final startMs = np.songStartMs ?? DateTime.now().millisecondsSinceEpoch;
+      _songs.add(_SongEntry(np, startMs));
+      if (_songs.length > 6) _songs.removeAt(0);
+      final agoSec = ((DateTime.now().millisecondsSinceEpoch - startMs) / 1000).round();
+      DiagLog.log(
+        'brano dal server: "${np.title}" - ${np.artist} (iniziato ${agoSec}s fa, '
+        'durata ${np.durationSec ?? '?'}s, poi: "${np.nextTitle}")',
+      );
     }
-    _lastArtist = nowPlaying.artist;
-    _lastTitle = nowPlaying.title;
-    _lastNextTitle = nowPlaying.nextTitle;
-    _lastNextArtist = nowPlaying.nextArtist;
+    _applyHeardSong();
+  }
 
-    // Con inizio e durata noti la schermata di sistema mostra la barra del
-    // tempo (niente salti: i comandi restano spenti); senza, resta "diretta".
-    final hasProgress = nowPlaying.songStartMs != null &&
-        nowPlaying.durationSec != null &&
-        nowPlaying.durationSec! > 0;
-    final item = MediaItem(
+  /// Sceglie il brano che l'ascoltatore sta SENTENDO ORA (ora - ritardo del
+  /// buffer) e, se e' cambiato, aggiorna titolo, copertina, "Poi:" e barra.
+  /// Chiamata a ogni cambio dati e ogni secondo dal controllo periodico.
+  void _applyHeardSong() {
+    if (_songs.isEmpty) return;
+    final listening =
+        _player.playing && _player.processingState == ProcessingState.ready;
+    _SongEntry target;
+    if (!listening) {
+      // Pausa, caricamento, primo avvio: se c'e' gia' un brano mostrato lo si
+      // lascia (quello che si sentiva); al primo avvio si mostra l'ultimo noto.
+      if (_shownSong != null) return;
+      target = _songs.last;
+    } else {
+      final ahead = _bufferAheadSeconds();
+      // Dopo un nuovo caricamento il buffer si sta ancora riempiendo: il ritardo
+      // misurato non e' attendibile, si aspetta.
+      if (_allowSongBack && ahead <= 5.0) return;
+      final delaySec = ahead + _pausedExtraSec + _metadataOffsetSec;
+      final heardMs =
+          DateTime.now().millisecondsSinceEpoch - (delaySec * 1000).round();
+      target = _songs.first;
+      for (final e in _songs) {
+        if (e.startMs <= heardMs) target = e;
+      }
+      final shown = _shownSong;
+      if (shown != null && !_allowSongBack) {
+        final shownIdx = _songs.indexOf(shown);
+        final targetIdx = _songs.indexOf(target);
+        if (shownIdx >= 0 && targetIdx < shownIdx) target = shown;
+      }
+      _allowSongBack = false;
+    }
+    if (identical(target, _shownSong)) return;
+    _showSong(target);
+  }
+
+  /// Mostra il brano [target] su telefono, auto e blocco schermo.
+  void _showSong(_SongEntry target) {
+    _shownSong = target;
+    final np = target.np;
+    final agoSec =
+        ((DateTime.now().millisecondsSinceEpoch - target.startMs) / 1000).round();
+    DiagLog.log(
+      'brano mostrato: "${np.title}" (iniziato ${agoSec}s fa sul server, ritardo '
+      'buffer ${(_bufferAheadSeconds() + _pausedExtraSec).toStringAsFixed(1)}s, '
+      'poi: "${np.nextTitle}")',
+    );
+    final hasProgress =
+        np.songStartMs != null && np.durationSec != null && np.durationSec! > 0;
+    _baseItem = MediaItem(
       id: RadioConfig.streamUrl,
-      title: nowPlaying.title,
-      artist: nowPlaying.subtitle(),
-      artUri: Uri.parse(nowPlaying.cover),
-      duration: hasProgress ? Duration(seconds: nowPlaying.durationSec!) : null,
+      title: np.title,
+      artist: np.subtitle(),
+      artUri: Uri.parse(np.cover),
+      // Con inizio e durata noti la schermata di sistema mostra la barra del
+      // tempo (niente salti: i comandi restano spenti); senza, resta "diretta".
+      duration: hasProgress ? Duration(seconds: np.durationSec!) : null,
       isLive: !hasProgress,
       // Copertina originale: in auto e sulla lock screen resta quella standard
       // (niente effetto disco, scelta di Domenico); il disco e' solo nell'app.
       extras: {
-        'cover': nowPlaying.cover,
+        'cover': np.cover,
         // Canzone successiva: la schermata del telefono mostra "Poi: ...".
-        'nextTitle': nowPlaying.nextTitle,
-        'nextArtist': nowPlaying.nextArtist,
-        if (nowPlaying.songStartMs != null) 'songStartMs': nowPlaying.songStartMs,
-        if (nowPlaying.durationSec != null) 'songDurationSec': nowPlaying.durationSec,
+        'nextTitle': np.nextTitle,
+        'nextArtist': np.nextArtist,
+        if (np.songStartMs != null) 'songStartMs': target.startMs,
+        if (np.durationSec != null) 'songDurationSec': np.durationSec,
       },
     );
-    // Il suono arriva con il ritardo del buffer (~30 s): titolo e copertina
-    // compaiono con lo stesso ritardo. Un solo timer: l'ultimo cambio vince, e
-    // un aggiornamento vecchio non puo' piu' coprirne uno nuovo.
-    _metaTimer?.cancel();
-    _metaTimer = null;
-    final listening =
-        _player.playing && _player.processingState == ProcessingState.ready;
-    final delaySec = listening
-        ? _bufferAheadSeconds() + _pausedExtraSec + _metadataOffsetSec
-        : 0.0;
-    void apply() {
-      _baseItem = item;
-      _songStartMs = hasProgress ? nowPlaying.songStartMs : null;
-      _songDurationSec = hasProgress ? nowPlaying.durationSec : null;
-      if (hasProgress) {
-        _anchorSong(running: _player.playing);
-      }
-      _pushMediaItem();
-      _publishState();
-      _sendNextToCarPlay(nowPlaying);
+    _songStartMs = hasProgress ? target.startMs : null;
+    _songDurationSec = hasProgress ? np.durationSec : null;
+    if (hasProgress) {
+      _anchorSong(running: _player.playing);
     }
-
-    if (delaySec >= 1.5) {
-      _metaTimer = Timer(Duration(milliseconds: (delaySec * 1000).round()), apply);
-    } else {
-      apply();
-    }
+    _pushMediaItem();
+    _publishState();
+    _sendNextToCarPlay(np);
   }
 
   bool get _hasSongProgress =>
@@ -1577,4 +1624,14 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     _interruptionSub?.cancel();
     _player.dispose();
   }
+}
+
+/// Un brano visto da current.php: dati del server e istante (ora del telefono,
+/// ms) in cui e' iniziato. Se il server non lo dice, l'istante in cui lo si e'
+/// visto per la prima volta.
+class _SongEntry {
+  NowPlaying np;
+  final int startMs;
+
+  _SongEntry(this.np, this.startMs);
 }
