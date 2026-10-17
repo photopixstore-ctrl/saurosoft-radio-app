@@ -5,6 +5,7 @@ import 'package:audio_session/audio_session.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:just_audio/just_audio.dart';
+import '../models/now_playing.dart';
 import '../radio_config.dart';
 import 'diag_log.dart';
 import 'metadata_service.dart';
@@ -153,6 +154,22 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   DateTime _stateSince = DateTime.now();
   String _lastArtist = '';
   String _lastTitle = '';
+  String _lastNextTitle = '';
+  String _lastNextArtist = '';
+
+  // Barra di avanzamento del brano (CarPlay, blocco schermo). La radio e' dal
+  // vivo ma current.php da' inizio e durata del brano: il tempo mostrato e'
+  // quello UDITO, cioe' inizio sul server + ritardo del buffer. Il sistema
+  // fa avanzare la barra da solo; qui si tiene un'ancora (secondi di brano a
+  // un certo istante) che si riallinea solo quando serve.
+  int? _songStartMs;
+  int? _songDurationSec;
+  double _songAnchorSec = 0.0;
+  DateTime _songAnchorAt = DateTime.now();
+  bool _songAnchorRunning = false;
+  // Dopo un nuovo caricamento il buffer si riempie in pochi secondi: appena e'
+  // pieno si riallinea il tempo del brano al valore reale.
+  bool _songNeedsAnchor = true;
 
   // Buffer = secondi di audio gia' scaricato ma non ancora suonato. Su iOS la
   // posizione di riproduzione di questo stream resta sempre 0, ma
@@ -188,7 +205,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   Future<void> _init() async {
-    DiagLog.log('--- avvio handler (build rete v13l widget) ---');
+    DiagLog.log('--- avvio handler (build rete v13m poi+tempo) ---');
 
     _attachPlayerListeners();
 
@@ -414,6 +431,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     } else {
       processing = AudioProcessingState.loading;
     }
+    _syncSongAnchor(showPlaying);
     playbackState.add(playbackState.value.copyWith(
       controls: [
         if (showPlaying) MediaControl.pause else MediaControl.play,
@@ -423,7 +441,9 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       androidCompactActionIndices: const [0],
       processingState: processing,
       playing: showPlaying,
-      updatePosition: _player.position,
+      updatePosition: _hasSongProgress
+          ? Duration(milliseconds: (_songElapsedNow() * 1000).round())
+          : _player.position,
       bufferedPosition: _player.bufferedPosition,
       speed: _player.speed,
     ));
@@ -493,6 +513,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     _activeSince = null;
     _lastBufferedPos = Duration.zero;
     _bufferGrewAt = DateTime.now();
+    _songNeedsAnchor = true;
     _publishState();
     _pausedExtraSec = 0.0;
     _activationChain = 0;
@@ -876,6 +897,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     _tickCount++;
     _publishBuffer();
     _updateSlowdown();
+    _maybeReanchorSong();
     if (_tickCount % 10 == 0) {
       DiagLog.log(
         'health playing=${_player.playing} proc=${_player.processingState.name} '
@@ -1068,19 +1090,30 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   Future<void> _refreshMetadata() async {
     final nowPlaying = await _metadataService.fetchNowPlaying();
     if (nowPlaying == null) return;
-    if (nowPlaying.artist == _lastArtist && nowPlaying.title == _lastTitle) {
+    final sameSong =
+        nowPlaying.artist == _lastArtist && nowPlaying.title == _lastTitle;
+    final sameNext = nowPlaying.nextTitle == _lastNextTitle &&
+        nowPlaying.nextArtist == _lastNextArtist;
+    if (sameSong && sameNext) {
       return;
     }
     _lastArtist = nowPlaying.artist;
     _lastTitle = nowPlaying.title;
+    _lastNextTitle = nowPlaying.nextTitle;
+    _lastNextArtist = nowPlaying.nextArtist;
 
+    // Con inizio e durata noti la schermata di sistema mostra la barra del
+    // tempo (niente salti: i comandi restano spenti); senza, resta "diretta".
+    final hasProgress = nowPlaying.songStartMs != null &&
+        nowPlaying.durationSec != null &&
+        nowPlaying.durationSec! > 0;
     final item = MediaItem(
       id: RadioConfig.streamUrl,
       title: nowPlaying.title,
       artist: nowPlaying.subtitle(),
       artUri: Uri.parse(nowPlaying.cover),
-      // Diretta: iOS/CarPlay tolgono barra di avanzamento e salti avanti/indietro.
-      isLive: true,
+      duration: hasProgress ? Duration(seconds: nowPlaying.durationSec!) : null,
+      isLive: !hasProgress,
       // Copertina originale: in auto e sulla lock screen resta quella standard
       // (niente effetto disco, scelta di Domenico); il disco e' solo nell'app.
       extras: {
@@ -1101,7 +1134,14 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
         : 0.0;
     void apply() {
       _baseItem = item;
+      _songStartMs = hasProgress ? nowPlaying.songStartMs : null;
+      _songDurationSec = hasProgress ? nowPlaying.durationSec : null;
+      if (hasProgress) {
+        _anchorSong(running: _player.playing);
+      }
       _pushMediaItem();
+      _publishState();
+      _sendNextToCarPlay(nowPlaying);
     }
 
     if (delaySec >= 1.5) {
@@ -1109,6 +1149,77 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     } else {
       apply();
     }
+  }
+
+  bool get _hasSongProgress =>
+      _songStartMs != null && (_songDurationSec ?? 0) > 0;
+
+  /// Secondi di brano che l'ascoltatore sta sentendo ORA (dall'ancora).
+  double _songElapsedNow() {
+    var sec = _songAnchorSec;
+    if (_songAnchorRunning) {
+      sec += DateTime.now().difference(_songAnchorAt).inMilliseconds /
+          1000.0 *
+          _player.speed;
+    }
+    final dur = _songDurationSec;
+    if (dur != null && sec > dur) sec = dur.toDouble();
+    return sec < 0 ? 0.0 : sec;
+  }
+
+  /// Secondi di brano uditi, ricavati dal server: tempo dall'inizio del brano
+  /// meno il ritardo del buffer (stessa formula che ritarda titolo/copertina).
+  double _songElapsedFromServer() {
+    final start = _songStartMs;
+    if (start == null) return 0.0;
+    final live = (DateTime.now().millisecondsSinceEpoch - start) / 1000.0;
+    var heard = live - (_bufferAheadSeconds() + _pausedExtraSec + _metadataOffsetSec);
+    final dur = _songDurationSec;
+    if (dur != null && heard > dur) heard = dur.toDouble();
+    return heard < 0 ? 0.0 : heard;
+  }
+
+  void _anchorSong({double? sec, required bool running}) {
+    _songAnchorSec = sec ?? _songElapsedFromServer();
+    _songAnchorAt = DateTime.now();
+    _songAnchorRunning = running;
+  }
+
+  /// Pausa/ripresa: l'ancora si ferma e riparte dal punto in cui si e' fermata
+  /// (riprendendo dal buffer l'audio continua esattamente da li').
+  void _syncSongAnchor(bool running) {
+    if (!_hasSongProgress) return;
+    if (running != _songAnchorRunning) {
+      _anchorSong(sec: _songElapsedNow(), running: running);
+    }
+  }
+
+  /// Riallinea il tempo del brano al valore reale: appena il buffer e' pieno
+  /// dopo un nuovo caricamento, poi solo se la differenza supera i 10 s (con
+  /// rete debole il buffer oscilla: niente salti per poco).
+  void _maybeReanchorSong() {
+    if (!_hasSongProgress) return;
+    final listening =
+        _player.playing && _player.processingState == ProcessingState.ready;
+    if (!listening) return;
+    final truth = _songElapsedFromServer();
+    final drift = (truth - _songElapsedNow()).abs();
+    final refill = _songNeedsAnchor && _bufferAheadSeconds() > 5.0;
+    if (refill || drift > 10.0) {
+      _songNeedsAnchor = false;
+      _anchorSong(sec: truth, running: true);
+      _publishState();
+    }
+  }
+
+  /// Canzone successiva per il pulsante "Poi:" della schermata CarPlay.
+  void _sendNextToCarPlay(NowPlaying n) {
+    if (!_isIos) return;
+    unawaited(_carPlayChannel.invokeMethod<void>('next', <String, String>{
+      'title': n.nextTitle,
+      'artist': n.nextSubtitle(),
+      'cover': n.nextCover,
+    }).catchError((Object _) {}));
   }
 
   /// Pubblica il brano corrente. La riga "album" (sotto l'artista su CarPlay e

@@ -19,7 +19,16 @@ final class CarPlayBridge {
   private(set) var bufferBars: Int = -1
   var onBufferChanged: ((Int) -> Void)?
 
-  /// Radio dal vivo: niente salto avanti/indietro, niente barra di avanzamento.
+  /// Canzone successiva (campo next_* di current.php): titolo, artista (con
+  /// anno) e indirizzo della copertina. Titolo vuoto = non nota.
+  private(set) var nextTitle: String = ""
+  private(set) var nextArtist: String = ""
+  private(set) var nextCover: String = ""
+  var onNextChanged: (() -> Void)?
+
+  /// Radio dal vivo: niente salto avanti/indietro e la barra del tempo non si
+  /// puo' spostare. La barra stessa (tempo trascorso/rimanente del brano) la
+  /// mostra il sistema quando il player pubblica durata e posizione.
   static func disableSkipCommands() {
     let c = MPRemoteCommandCenter.shared()
     c.skipForwardCommand.isEnabled = false
@@ -29,10 +38,6 @@ final class CarPlayBridge {
     c.changePlaybackPositionCommand.isEnabled = false
     c.nextTrackCommand.isEnabled = false
     c.previousTrackCommand.isEnabled = false
-    if var info = MPNowPlayingInfoCenter.default().nowPlayingInfo {
-      info[MPNowPlayingInfoPropertyIsLiveStream] = true
-      MPNowPlayingInfoCenter.default().nowPlayingInfo = info
-    }
   }
 
   private func attachHandler() {
@@ -42,6 +47,15 @@ final class CarPlayBridge {
         DispatchQueue.main.async {
           self?.bufferBars = bars
           self?.onBufferChanged?(bars)
+        }
+        result(nil)
+      } else if call.method == "next" {
+        let args = call.arguments as? [String: Any]
+        DispatchQueue.main.async {
+          self?.nextTitle = (args?["title"] as? String) ?? ""
+          self?.nextArtist = (args?["artist"] as? String) ?? ""
+          self?.nextCover = (args?["cover"] as? String) ?? ""
+          self?.onNextChanged?()
         }
         result(nil)
       } else if call.method == "disableSkip" {
@@ -109,7 +123,9 @@ enum BufferBarsImage {
 /// standard "In riproduzione" di Apple. In una app audio Apple consente solo
 /// questi modelli: niente grafica libera.
 @available(iOS 14.0, *)
-class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPTabBarTemplateDelegate {
+class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPTabBarTemplateDelegate,
+  CPNowPlayingTemplateObserver
+{
   private static let playlistUrl = "https://www.saurosoftradio.it/api/playlist.php"
   private static let maxPlaylistItems = 25
 
@@ -174,6 +190,15 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPT
     }
     updateBufferButton(CarPlayBridge.shared.bufferBars)
 
+    // Pulsante "Poi: <titolo>" in alto a destra nella schermata "In
+    // riproduzione": toccandolo si apre l'elenco con titolo e artista della
+    // canzone successiva.
+    CPNowPlayingTemplate.shared.add(self)
+    CarPlayBridge.shared.onNextChanged = { [weak self] in
+      self?.updateUpNext()
+    }
+    updateUpNext()
+
     loadPlaylist()
 
     // Avvio automatico quando il telefono si collega a CarPlay (richiesta di
@@ -192,6 +217,8 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPT
     didDisconnectInterfaceController interfaceController: CPInterfaceController
   ) {
     CarPlayBridge.shared.onBufferChanged = nil
+    CarPlayBridge.shared.onNextChanged = nil
+    CPNowPlayingTemplate.shared.remove(self)
     self.interfaceController = nil
     self.playlistTemplate = nil
   }
@@ -205,6 +232,53 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPT
   private func updateBufferButton(_ bars: Int) {
     let button = CPNowPlayingImageButton(image: BufferBarsImage.make(bars: max(bars, 0))) { _ in }
     CPNowPlayingTemplate.shared.updateNowPlayingButtons([button])
+  }
+
+  /// Testo del pulsante in alto a destra: "Poi: " + titolo (troncato se lungo).
+  /// Senza una canzone successiva sicura il pulsante sparisce.
+  private func updateUpNext() {
+    let template = CPNowPlayingTemplate.shared
+    let title = CarPlayBridge.shared.nextTitle
+    if title.isEmpty {
+      template.isUpNextButtonEnabled = false
+      return
+    }
+    var shown = title
+    if shown.count > 26 {
+      shown = String(shown.prefix(24)) + "..."
+    }
+    template.upNextTitle = "Poi: " + shown
+    template.isUpNextButtonEnabled = true
+  }
+
+  func nowPlayingTemplateUpNextButtonTapped(_ nowPlayingTemplate: CPNowPlayingTemplate) {
+    let bridge = CarPlayBridge.shared
+    guard !bridge.nextTitle.isEmpty else { return }
+    let item = CPListItem(
+      text: bridge.nextTitle,
+      detailText: bridge.nextArtist.isEmpty ? nil : bridge.nextArtist,
+      image: UIImage(named: "CarPlayLogo")
+    )
+    let list = CPListTemplate(
+      title: "Prossima canzone",
+      sections: [CPListSection(items: [item])]
+    )
+    interfaceController?.pushTemplate(list, animated: true, completion: nil)
+
+    // Copertina della canzone successiva (se c'e'), ridimensionata per l'elenco.
+    guard let url = URL(string: bridge.nextCover), !bridge.nextCover.isEmpty else { return }
+    var request = URLRequest(url: url)
+    request.timeoutInterval = 8
+    URLSession.shared.dataTask(with: request) { data, _, _ in
+      guard let data = data, let image = UIImage(data: data) else { return }
+      let side = CPListItem.maximumImageSize
+      let resized = UIGraphicsImageRenderer(size: side).image { _ in
+        image.draw(in: CGRect(origin: .zero, size: side))
+      }
+      DispatchQueue.main.async {
+        item.setImage(resized)
+      }
+    }.resume()
   }
 
   private func loadPlaylist() {

@@ -14,6 +14,13 @@ class NowPlaying {
   final int? durationSec;
   final int? songStartMs;
 
+  /// Canzone successiva (campi next_* di current.php). Vuoti se il server non
+  /// la conosce o non e' sicuro (spot/jingle): in quel caso niente "Poi:".
+  final String nextTitle;
+  final String nextArtist;
+  final String nextYear;
+  final String nextCover;
+
   const NowPlaying({
     required this.title,
     required this.artist,
@@ -21,6 +28,10 @@ class NowPlaying {
     required this.cover,
     this.durationSec,
     this.songStartMs,
+    this.nextTitle = '',
+    this.nextArtist = '',
+    this.nextYear = '',
+    this.nextCover = '',
   });
 
   factory NowPlaying.fallback() => NowPlaying(
@@ -55,7 +66,17 @@ class NowPlaying {
       artist: (json['artist'] ?? '').toString(),
       year: (json['year'] ?? '').toString(),
       cover: cover.isEmpty ? RadioConfig.fallbackLogoUrl : cover,
+      nextTitle: (json['next_title'] ?? '').toString().trim(),
+      nextArtist: (json['next_artist'] ?? '').toString().trim(),
+      nextYear: (json['next_year'] ?? '').toString().trim(),
+      nextCover: (json['next_cover'] ?? '').toString().trim(),
     );
+  }
+
+  /// Artista della canzone successiva con l'anno, come nell'elenco CarPlay.
+  String nextSubtitle() {
+    if (nextArtist.isEmpty) return '';
+    return nextYear.isNotEmpty ? '$nextArtist ($nextYear)' : nextArtist;
   }
 
   /// Sottotitolo pronto per la UI: "Artista (Anno)" oppure il nome
