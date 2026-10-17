@@ -10,8 +10,16 @@ import '../models/now_playing.dart';
 /// nessuna ricerca aggiuntiva su iTunes/Deezer lato app.
 class MetadataService {
   Future<NowPlaying?> fetchNowPlaying() async {
+    // Prima il server radio (ha anche la canzone successiva); se non risponde
+    // si ripiega su current.php del sito (senza "Poi:").
+    final primary = await _fetch(RadioConfig.nowPlayingUrl);
+    if (primary != null) return primary;
+    return _fetch(RadioConfig.metadataUrl);
+  }
+
+  Future<NowPlaying?> _fetch(String baseUrl) async {
     final timestamp = DateTime.now().millisecondsSinceEpoch;
-    final uri = Uri.parse('${RadioConfig.metadataUrl}?t=$timestamp');
+    final uri = Uri.parse('$baseUrl?t=$timestamp');
 
     try {
       final response = await http.get(uri).timeout(const Duration(seconds: 4));

@@ -43,6 +43,12 @@ class RadioConfig {
   // Endpoint che restituisce i metadati live (title, artist, year, cover)
   static const String metadataUrl = 'https://www.saurosoftradio.it/api/current.php';
 
+  // Dato principale servito dal server radio (stessi campi di current.php piu'
+  // next_title/next_artist/next_year/next_cover per la canzone successiva).
+  // current.php resta come ripiego e come sonda di rete.
+  static const String nowPlayingUrl =
+      'https://streaming.saurosoftradio.it/api/nowplaying_static/app-current.json';
+
   // Base per gli sfondi stagionali (stesso set gia' usato nella skill Alexa
   // e nell'app Android): sono immagini remote, non incluse nel progetto.
   static const String sfondiBaseUrl = 'https://www.saurosoftradio.it/loghiradio/';
