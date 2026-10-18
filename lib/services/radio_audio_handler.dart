@@ -211,7 +211,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   Future<void> _init() async {
-    DiagLog.log('--- avvio handler (build rete v13p brano udito) ---');
+    DiagLog.log('--- avvio handler (build rete v13q buffer dopo errore sessione) ---');
 
     _attachPlayerListeners();
 
@@ -718,6 +718,11 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   void _startPlayer() {
     unawaited(_player.play().catchError((Object e) {
       DiagLog.log('player.play() errore: ${e.runtimeType} $e');
+      // Il player risulta "in riproduzione" anche se iOS ha rifiutato l'audio:
+      // quei secondi di silenzio non vanno contati come ascoltati, altrimenti
+      // il buffer misurato resta sotto di quanto vale davvero (log 18/10 ore
+      // 12:30: barra del buffer a zero per 12 minuti, titoli in anticipo).
+      _activeSince = null;
       if (e.toString().contains('Session activation failed')) {
         unawaited(_retryActivation());
       }
