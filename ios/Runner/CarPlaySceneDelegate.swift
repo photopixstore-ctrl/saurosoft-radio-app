@@ -172,6 +172,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPT
       "www.photopix.it",
       "via Filzi 7, 38060 Nomi (TN)",
       "tel. 0464.350707",
+      "Per segnalare un problema o suggerire un miglioramento scrivi a info@photopix.it",
     ]
     let info = CPListTemplate(
       title: "Informazioni sviluppatore",

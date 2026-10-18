@@ -81,7 +81,8 @@ class RadioConfig {
 
   // Testo mostrato nella sezione "Info" dell'app
   static const String infoText =
-      'App sviluppata da Photopix\nwww.photopix.it\nvia Filzi 7, 38060 Nomi (TN)\ntel. 0464.350707';
+      'App sviluppata da Photopix\nwww.photopix.it\nvia Filzi 7, 38060 Nomi (TN)\ntel. 0464.350707\n\n'
+      'Per segnalare un problema o suggerire un miglioramento scrivi a info@photopix.it';
   static const String infoLogoUrl =
       'https://www.photopix.it/sito/wp-content/uploads/2019/11/logofooter2.png';
 }
