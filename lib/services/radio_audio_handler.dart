@@ -211,7 +211,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   Future<void> _init() async {
-    DiagLog.log('--- avvio handler (build rete v13u backup rapido e titolo) ---');
+    DiagLog.log('--- avvio handler (build rete v13v sonda anticipata e titolo dopo cambio) ---');
 
     _attachPlayerListeners();
 
@@ -666,6 +666,10 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
         } catch (_) {}
       }());
       _lastLoadOffline = false;
+      // Il nuovo flusso ha un ritardo diverso dal vecchio (burst del server):
+      // il brano si ricalcola solo a buffer riempito (come dopo un caricamento).
+      _lastLoadOkAt = DateTime.now();
+      _allowSongBack = true;
       DiagLog.log(
         'cambio senza stacco: fatto in '
         '${DateTime.now().difference(startedAt).inMilliseconds} ms '
@@ -959,7 +963,11 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
         // finisca, ma solo se la rete risponde (se e' giu', ricaricare
         // fermerebbe l'audio residuo senza ottenere niente).
         final nearEnd = ahead <= _swapAtAheadSec;
-        if (stagnant > const Duration(seconds: 3) &&
+        // Con poco buffer (<= 9 s) la sonda parte dopo 1,5 s di stallo invece di 3
+        // (prova 19/10 22:56: con ~7 s di buffer il passaggio al backup e' arrivato
+        // con 1 s di margine).
+        final lowBufferNow = ahead <= 9.0;
+        if (stagnant > Duration(milliseconds: lowBufferNow ? 1500 : 3000) &&
             !_probing &&
             (_networkWasDown ||
                 (nearEnd && now.difference(_lastProbeAt) > const Duration(seconds: 3)) ||
@@ -1001,7 +1009,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
                 _radioDownSince ??= DateTime.now();
                 final since = _radioDownSince!;
                 if (DateTime.now().difference(since) >=
-                    Duration(seconds: lowBuffer ? 1 : 4)) {
+                    Duration(seconds: aheadNow <= 6.0 ? 0 : (lowBuffer ? 1 : 4))) {
                   _radioDownSince = null;
                   _networkWasDown = false;
                   _switchToBackupNow();
