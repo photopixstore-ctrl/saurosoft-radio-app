@@ -1141,9 +1141,11 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
         _player.playing && _player.processingState == ProcessingState.ready;
     _SongEntry target;
     if (!listening) {
-      // Pausa, caricamento, primo avvio: se c'e' gia' un brano mostrato lo si
-      // lascia (quello che si sentiva); al primo avvio si mostra l'ultimo noto.
-      if (_shownSong != null) return;
+      // Fermo. Con un'interruzione o una pausa temporanea (si vuole riprendere)
+      // si lascia il brano che si stava sentendo. Se invece non si vuole
+      // ascoltare (app appena aperta, pausa dell'utente) si mostra SEMPRE il
+      // brano in onda adesso: chi preme play deve vedere cosa sta suonando.
+      if (_wasPlayingBeforeError && _shownSong != null) return;
       target = _songs.last;
     } else {
       final ahead = _bufferAheadSeconds();
