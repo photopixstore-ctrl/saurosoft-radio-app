@@ -211,7 +211,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   Future<void> _init() async {
-    DiagLog.log('--- avvio handler (build rete v13s titolo in onda da fermo) ---');
+    DiagLog.log('--- avvio handler (build rete v13t logo su backup) ---');
 
     _attachPlayerListeners();
 
@@ -1136,6 +1136,13 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   /// buffer) e, se e' cambiato, aggiorna titolo, copertina, "Poi:" e barra.
   /// Chiamata a ogni cambio dati e ogni secondo dal controllo periodico.
   void _applyHeardSong() {
+    // Sul file di riserva non c'e' nessun brano da mostrare: i dati del server
+    // (se risponde) riguardano la diretta, che in quel momento non si sente.
+    if (_usingBackup) {
+      _showBackup();
+      return;
+    }
+    _showingBackup = false;
     if (_songs.isEmpty) return;
     final listening =
         _player.playing && _player.processingState == ProcessingState.ready;
@@ -1181,8 +1188,44 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
     _showSong(target);
   }
 
+  bool _showingBackup = false;
+
+  /// Durante la riproduzione del file di riserva: logo della radio e scritta
+  /// "Riproduzione di riserva", niente brano, niente "Poi:", niente barra.
+  void _showBackup() {
+    if (_showingBackup) return;
+    _showingBackup = true;
+    _shownSong = null;
+    _allowSongBack = true;
+    _songStartMs = null;
+    _songDurationSec = null;
+    DiagLog.log('riproduzione di riserva: mostro il logo della radio');
+    _baseItem = MediaItem(
+      id: RadioConfig.streamUrl,
+      title: 'Riproduzione di riserva',
+      artist: RadioConfig.stationName,
+      artUri: Uri.parse(RadioConfig.fallbackLogoUrl),
+      isLive: true,
+      extras: {
+        'cover': RadioConfig.fallbackLogoUrl,
+        'nextTitle': '',
+        'nextArtist': '',
+      },
+    );
+    _pushMediaItem();
+    _publishState();
+    if (_isIos) {
+      unawaited(_carPlayChannel.invokeMethod<void>('next', <String, String>{
+        'title': '',
+        'artist': '',
+        'cover': '',
+      }).catchError((Object _) {}));
+    }
+  }
+
   /// Mostra il brano [target] su telefono, auto e blocco schermo.
   void _showSong(_SongEntry target) {
+    _showingBackup = false;
     _shownSong = target;
     final np = target.np;
     final agoSec =
