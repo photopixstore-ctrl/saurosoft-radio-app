@@ -211,7 +211,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   Future<void> _init() async {
-    DiagLog.log('--- avvio handler (build rete v13q buffer dopo errore sessione) ---');
+    DiagLog.log('--- avvio handler (build rete v13r titolo dopo ricarica) ---');
 
     _attachPlayerListeners();
 
@@ -1149,7 +1149,17 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       final ahead = _bufferAheadSeconds();
       // Dopo un nuovo caricamento il buffer si sta ancora riempiendo: il ritardo
       // misurato non e' attendibile, si aspetta.
-      if (_allowSongBack && ahead <= 5.0) return;
+      if (_allowSongBack) {
+        if (ahead <= 5.0) return;
+        // Il buffer sale a ~28 s in pochi secondi: valutare a 6-20 s sceglierebbe
+        // un brano troppo nuovo se un cambio brano cade negli ultimi 28 s (poi
+        // non si torna piu' indietro). Si aspetta che sia pieno, al massimo 6 s
+        // dal collegamento (con rete debole non arriva mai a 22 s).
+        if (ahead < 22.0 &&
+            DateTime.now().difference(_lastLoadOkAt) < const Duration(seconds: 6)) {
+          return;
+        }
+      }
       final delaySec = ahead + _pausedExtraSec + _metadataOffsetSec;
       final heardMs =
           DateTime.now().millisecondsSinceEpoch - (delaySec * 1000).round();
