@@ -211,7 +211,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   Future<void> _init() async {
-    DiagLog.log('--- avvio handler (build rete v13t logo su backup) ---');
+    DiagLog.log('--- avvio handler (build rete v13u backup rapido e titolo) ---');
 
     _attachPlayerListeners();
 
@@ -695,6 +695,15 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
           Future<void>.delayed(Duration.zero, () {
             unawaited(_seamlessReload(urlOverride: retryTarget, fromBackup: fromBackup));
           });
+        } else if (fromBackup && oldStillPlaying) {
+          // Il live risponde alla sonda ma non e' ancora pronto (log reale 19/10:
+          // Icecast tornato, AzuraCast ancora offline, -11800): il file di riserva
+          // sta suonando bene, non si ferma per un ricaricamento a vuoto. Si resta
+          // li' e si riprova al prossimo controllo (5 s).
+          DiagLog.log('live non ancora pronto: resto sul file di riserva');
+          _usingBackup = true;
+          _lastTrouble = DateTime.now();
+          _startBackupRecoveryTimer();
         } else {
           // Ricaricamento classico (il vecchio flusso e' comunque in stallo).
           unawaited(_loadAndPlay(retryTarget));
@@ -975,8 +984,13 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
             if (!up) {
               _lastTrouble = DateTime.now();
               // Flusso fermo da piu' di 5 s e non risponde: rete assente o radio caduta?
-              final stalled =
-                  DateTime.now().difference(_bufferGrewAt) > const Duration(seconds: 5);
+              // Con poco buffer (dopo un riavvio del server resta ~8 s) non c'e' il
+              // tempo di aspettare 5+4 s: il passaggio al backup deve avvenire
+              // finche' l'audio residuo copre il cambio (log reale 19/10: 9 s di
+              // silenzio con 8 s di buffer).
+              final lowBuffer = aheadNow <= 9.0;
+              final stalled = DateTime.now().difference(_bufferGrewAt) >
+                  Duration(seconds: lowBuffer ? 2 : 5);
               final referenceUp = stalled ? await _referenceIsUp() : false;
               if (!_wasPlayingBeforeError || _loadInFlight || _usingBackup) return;
               if (referenceUp) {
@@ -986,7 +1000,8 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
                 // file di riserva solo se la radio resta irraggiungibile per almeno 4 s.
                 _radioDownSince ??= DateTime.now();
                 final since = _radioDownSince!;
-                if (DateTime.now().difference(since) >= const Duration(seconds: 4)) {
+                if (DateTime.now().difference(since) >=
+                    Duration(seconds: lowBuffer ? 1 : 4)) {
                   _radioDownSince = null;
                   _networkWasDown = false;
                   _switchToBackupNow();
@@ -1103,6 +1118,14 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   Future<void> _refreshMetadata() async {
     final np = await _metadataService.fetchNowPlaying();
     if (np == null) return;
+    // Con la radio ferma AzuraCast serve un segnaposto ("Station Offline" o il
+    // nome della radio senza artista ne' durata): non e' un brano da mostrare.
+    if (np.title == 'Station Offline' ||
+        (np.artist.trim().isEmpty &&
+            np.durationSec == null &&
+            np.title == RadioConfig.stationName)) {
+      return;
+    }
     final last = _songs.isEmpty ? null : _songs.last;
     if (last != null && last.np.title == np.title && last.np.artist == np.artist) {
       // Il ripiego (current.php) non conosce la canzone successiva: si
@@ -1159,7 +1182,13 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       // Dopo un nuovo caricamento il buffer si sta ancora riempiendo: il ritardo
       // misurato non e' attendibile, si aspetta.
       if (_allowSongBack) {
-        if (ahead <= 5.0) return;
+        // (Con un flusso che non da' burst, es. radio.mp3 dopo un riavvio del
+        // server, il buffer resta a ~1 s: dopo 10 s si usa il ritardo reale,
+        // altrimenti il titolo resterebbe fermo per minuti: log reale 19/10.)
+        if (ahead <= 5.0 &&
+            DateTime.now().difference(_lastLoadOkAt) < const Duration(seconds: 10)) {
+          return;
+        }
         // Il buffer sale a ~28 s in pochi secondi: valutare a 6-20 s sceglierebbe
         // un brano troppo nuovo se un cambio brano cade negli ultimi 28 s (poi
         // non si torna piu' indietro). Si aspetta che sia pieno, al massimo 6 s
