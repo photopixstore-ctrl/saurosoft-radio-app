@@ -211,7 +211,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   Future<void> _init() async {
-    DiagLog.log('--- avvio handler (build rete v13r titolo dopo ricarica) ---');
+    DiagLog.log('--- avvio handler (build rete v13s titolo in onda da fermo) ---');
 
     _attachPlayerListeners();
 
