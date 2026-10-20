@@ -211,7 +211,7 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   Future<void> _init() async {
-    DiagLog.log('--- avvio handler (build rete v13v sonda anticipata e titolo dopo cambio) ---');
+    DiagLog.log('--- avvio handler (build rete v13w ripiego solo con rete, titolo senza buchi, pausa se sessione rifiutata) ---');
 
     _attachPlayerListeners();
 
@@ -560,10 +560,18 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
         _loadInFlight = false;
         _lastLoadOffline = _isOfflineError(e);
         if (url == RadioConfig.appStreamUrl && !_lastLoadOffline) {
-          _appStreamBadUntil = DateTime.now().add(const Duration(minutes: 3));
-          _consecutiveErrors = 0;
-          DiagLog.log('flusso app non risponde: ripiego su radio.mp3 per 3 minuti');
+          // Un timeout senza rete non dice niente sul flusso app: con il ripiego
+          // su radio.mp3 il buffer resta a ~15 s (2 tacche su 5) per tutto
+          // l'ascolto (log 20/10 ore 10:06). Si ripiega solo se la rete c'e'.
+          if (await _referenceIsUp()) {
+            _appStreamBadUntil = DateTime.now().add(const Duration(minutes: 3));
+            _consecutiveErrors = 0;
+            DiagLog.log('flusso app non risponde: ripiego su radio.mp3 per 3 minuti');
+          } else {
+            DiagLog.log('rete assente: nessun ripiego su radio.mp3');
+          }
         }
+        if (gen != _loadGen) return;
         _handleStreamError(
           'load fallito',
           delay: Duration(seconds: _lastLoadOffline ? 2 : 3),
@@ -687,7 +695,9 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
         // dopo un riavvio di Icecast mentre /radio.mp3 e' gia' tornato): si ripiega
         // su radio.mp3 per 3 minuti e si riprova SUBITO, lasciando suonare il
         // vecchio audio (file di riserva) invece di fermarlo con un ricaricamento.
-        if (target == RadioConfig.appStreamUrl && !_lastLoadOffline) {
+        if (target == RadioConfig.appStreamUrl &&
+            !_lastLoadOffline &&
+            await _referenceIsUp()) {
           _appStreamBadUntil = DateTime.now().add(const Duration(minutes: 3));
           DiagLog.log('flusso app non risponde: ripiego su radio.mp3 per 3 minuti');
         }
@@ -737,6 +747,10 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       // 12:30: barra del buffer a zero per 12 minuti, titoli in anticipo).
       _activeSince = null;
       if (e.toString().contains('Session activation failed')) {
+        // L'app puo' essere sospesa da iOS prima del prossimo tentativo (log 20/10
+        // 11:31-11:35: 4 minuti in silenzio con lo stato 'in riproduzione'):
+        // si mostra pausa, cosi' chi preme play fa ripartire una sessione nuova.
+        unawaited(_player.pause().catchError((Object _) {}));
         unawaited(_retryActivation());
       }
     }));
@@ -1212,6 +1226,15 @@ class RadioAudioHandler extends BaseAudioHandler with SeekHandler {
       target = _songs.first;
       for (final e in _songs) {
         if (e.startMs <= heardMs) target = e;
+      }
+      // Buco nello storico (app sospesa in pausa): se il brano scelto e' finito
+      // da tempo e ce n'e' uno piu' nuovo, il momento sentito cade in un brano
+      // che non conosciamo; si prende il piu' vicino successivo invece di un
+      // titolo vecchio (log 20/10 ore 10:52: "Lentamente" di 39 minuti prima).
+      final dur = target.np.durationSec;
+      if (dur != null && target.startMs + dur * 1000 + 5000 < heardMs) {
+        final idx = _songs.indexOf(target);
+        if (idx >= 0 && idx + 1 < _songs.length) target = _songs[idx + 1];
       }
       final shown = _shownSong;
       if (shown != null && !_allowSongBack) {
