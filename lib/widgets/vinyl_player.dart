@@ -127,6 +127,10 @@ class _VinylPlayerState extends State<VinylPlayer> with TickerProviderStateMixin
                         width: s * 0.72,
                         height: s * 0.72,
                         fit: BoxFit.cover,
+                        // A cambio brano la vecchia copertina resta finche' la nuova
+                        // non e' pronta, poi dissolvenza di 500 ms (niente buco scuro).
+                        useOldImageOnUrlChange: true,
+                        fadeInDuration: const Duration(milliseconds: 500),
                         errorWidget: (_, __, ___) =>
                             Container(width: s * 0.72, height: s * 0.72, color: Colors.white24),
                       ),
